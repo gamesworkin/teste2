@@ -684,10 +684,10 @@ function viewEstoque(root) {
         <option value="nao">Não lançar no financeiro</option></select></label>
       <label class="field"><span>Conta de origem</span><select id="e_acc">${accountOptions(defaultAccount())}</select></label>
       <label class="field hidden" id="e_instWrap"><span>Parcelas (a prazo)</span><select id="e_inst">${Array.from({length:12},(_,i)=>`<option value="${i+1}">${i+1}x</option>`).join("")}</select></label>
-      <label class="field hidden" id="e_firstWrap"><span>Vencimento da 1ª parcela</span><input id="e_first" type="date" value="${todayISO()}"></label>
+      <label class="field hidden" id="e_firstWrap"><span>Vencimento da 1ª parcela</span><input id="e_first" type="date" value="${addMonthsISO(todayISO(), 1)}"></label>
       <label class="field hidden" id="e_autoWrap"><span>Débito das parcelas</span><select id="e_auto">
-        <option value="1">Automático — quita na data do vencimento</option>
-        <option value="0">Manual — quitar pelo Contas a pagar</option></select></label>
+        <option value="0" selected>Manual — fica em aberto no Contas a pagar</option>
+        <option value="1">Automático — quita na data do vencimento</option></select></label>
       <div class="hidden" id="e_instPrev" style="grid-column:1/-1"></div>
     </div>
     <div class="card" style="margin-top:12px;background:var(--panel-2)"><div id="e_preview" class="muted">Preencha os campos para ver a simulação do novo custo médio.</div></div>
@@ -816,7 +816,7 @@ function viewEstoque(root) {
   ["e_pay", "e_inst", "e_first", "e_auto", "e_qty", "e_total", "e_unit", "e_freight", "e_date"].forEach(i => {
     $("#" + i).addEventListener("change", instPreview); $("#" + i).addEventListener("input", instPreview);
   });
-  $("#e_date").addEventListener("change", () => { if (!$("#e_first").dataset.touched) $("#e_first").value = $("#e_date").value; instPreview(); });
+  $("#e_date").addEventListener("change", () => { if (!$("#e_first").dataset.touched) $("#e_first").value = addMonthsISO($("#e_date").value || todayISO(), 1); instPreview(); });
   $("#e_first").addEventListener("change", () => { $("#e_first").dataset.touched = "1"; });
   instPreview();
 
@@ -865,9 +865,11 @@ function viewEstoque(root) {
         console.error("Falha ao gerar as parcelas em payables", err);
         toast(`Entrada salva, mas só ${created}/${parts.length} parcela(s) foram gravadas no contas a pagar: ${err?.message || err}`, "err");
       }
-      if (created === parts.length) {
-        // mostra o resultado já na aba certa do Financeiro
+      if (created > 0) {
+        // mostra o resultado já na aba certa do Financeiro, sem filtros escondendo
         STATE.finTab = "pay";
+        PERIOD_STORE["payPP"] = periodSeed("all");
+        PAY_FORCE_ALL = true;
         toast(n > 1
           ? `Entrada registrada · ${n} parcelas geradas no contas a pagar (venc. ${fmtDate(parts[0].due)} a ${fmtDate(parts[n - 1].due)})`
           : `Entrada registrada · conta a pagar gerada para ${fmtDate(parts[0].due)}`, "ok");
@@ -917,8 +919,9 @@ async function autoSettleDuePayables() {
     for (const r of list(STATE.payables)) {
       if (r.status === "pago" || !r.autoPay || !r.accountId) continue;
       if (!r.due || r.due > t) continue;
-      // evita quitar no mesmo momento em que a parcela acabou de ser criada
-      if (r.createdAt && Date.now() - r.createdAt < 60000) continue;
+      // nunca quitar automaticamente um título criado hoje: ele precisa aparecer
+      // em aberto no Contas a pagar antes de qualquer débito automático
+      if (r.createdAt && new Date(r.createdAt).toISOString().slice(0, 10) >= t) continue;
       if (finList().some(f => f.refKind === "payables" && f.refId === r.id)) continue;
       await update(ref(db, "payables/" + r.id), {
         status: "pago", settledAt: r.due, settledAmount: num(r.amount), autoSettled: true
@@ -1460,6 +1463,7 @@ function finForm(kinds, defaultKind, id) {
 }
 
 /* ---------- Contas a pagar / a receber ---------- */
+let PAY_FORCE_ALL = false;
 function accountsPanel(el, node, title, doneStatus, partyLabel) {
   const pidBase = node === "payables" ? "payP" : "recP";
   const pid = pidBase + "P";
@@ -1483,6 +1487,13 @@ function accountsPanel(el, node, title, doneStatus, partyLabel) {
     <p class="muted">Filtro de vencimento: <strong>${periodLabel(pid)}</strong> — por padrão mostra <strong>todos</strong> os títulos, inclusive parcelas com vencimento em meses futuros. Ao liquidar, o valor entra ou sai da conta escolhida e o saldo é atualizado.</p>
     <div id="${pidBase}_body" style="margin-top:12px"></div>
   </div>`;
+  if (node === "payables" && PAY_FORCE_ALL) {
+    PAY_FORCE_ALL = false;
+    PERIOD_STORE[pid] = periodSeed("all");
+    const md = $("#" + pid + "_mode"), fr = $("#" + pid + "_from"), to = $("#" + pid + "_to");
+    if (md) md.value = "all"; if (fr) fr.value = ""; if (to) to.value = "";
+    const st = $("#" + pidBase + "_st"); if (st) st.value = "";
+  }
   let rows = [];
   const draw = () => {
     const stF = $("#" + pidBase + "_st").value, q = ($("#" + pidBase + "_q").value || "").toLowerCase();
