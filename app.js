@@ -191,6 +191,7 @@ function bindData() {
   const rerender = () => {
     if (!STATE.ready) return;
     renderView();
+    reconcilePayables(true).then(nCreated => { if (nCreated) renderView(); });
     autoSettleDuePayables();
     checkReceivableAlerts();
   };
@@ -847,32 +848,20 @@ function viewEstoque(root) {
       const n = Math.max(1, Math.min(12, parseInt($("#e_inst").value) || 1));
       const first = $("#e_first").value || eDate;
       const autoPay = $("#e_auto").value === "1";
-      const parts = installmentPlan(total, n, first);
-      let created = 0;
-      try {
-        for (const part of parts) {
-          await push(ref(db, "payables"), {
-            description: `Compra ${p.name} (${q} un)` + (n > 1 ? ` — parcela ${part.i}/${n}` : ""),
-            supplier: $("#e_supplier").value.trim(),
-            amount: part.amount, due: part.due, status: "pendente", accountId: accId || "",
-            category: "Compra de mercadoria", refKind: "entry", refId: entRef.key,
-            installment: part.i, installments: n, autoPay: !!autoPay, createdAt: Date.now()
-          });
-          created++;
-        }
-        await update(ref(db, "entries/" + entRef.key), { installments: n, firstDue: first, autoPay: !!autoPay });
-      } catch (err) {
-        console.error("Falha ao gerar as parcelas em payables", err);
-        toast(`Entrada salva, mas só ${created}/${parts.length} parcela(s) foram gravadas no contas a pagar: ${err?.message || err}`, "err");
-      }
-      if (created > 0) {
+      const res = await createPayablesForEntry({
+        entryId: entRef.key, productName: p.name, qty: q, total, n, first,
+        supplier: $("#e_supplier").value.trim(), accountId: accId || "", autoPay
+      });
+      if (res.created > 0) {
         // mostra o resultado já na aba certa do Financeiro, sem filtros escondendo
         STATE.finTab = "pay";
         PERIOD_STORE["payPP"] = periodSeed("all");
         PAY_FORCE_ALL = true;
         toast(n > 1
-          ? `Entrada registrada · ${n} parcelas geradas no contas a pagar (venc. ${fmtDate(parts[0].due)} a ${fmtDate(parts[n - 1].due)})`
-          : `Entrada registrada · conta a pagar gerada para ${fmtDate(parts[0].due)}`, "ok");
+          ? `Entrada registrada · ${n} parcelas geradas no contas a pagar (venc. ${fmtDate(res.parts[0].due)} a ${fmtDate(res.parts[n - 1].due)})`
+          : `Entrada registrada · conta a pagar gerada para ${fmtDate(res.parts[0].due)}`, "ok");
+      } else {
+        toast(`Entrada salva, mas nenhuma parcela foi gravada no contas a pagar${res.error ? ": " + res.error : ""}. Abra o Financeiro › Contas a pagar e use "Gerar títulos faltantes".`, "err");
       }
     } else if (mode === "imediato" && accId) {
       await finAdd({
@@ -907,6 +896,59 @@ function addMonthsISO(iso, months) {
   const last = new Date(y, m - 1 + months + 1, 0).getDate();
   const dt = new Date(y, m - 1 + months, Math.min(d, last));
   return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+}
+
+/* Cria os títulos a pagar de uma entrada a prazo. Retorna {created, parts, error}. */
+async function createPayablesForEntry(o) {
+  const n = Math.max(1, Math.min(12, parseInt(o.n) || 1));
+  const parts = installmentPlan(o.total, n, o.first || todayISO());
+  let created = 0, error = "";
+  try {
+    for (const part of parts) {
+      await push(ref(db, "payables"), {
+        description: `Compra ${o.productName} (${o.qty} un)` + (n > 1 ? ` — parcela ${part.i}/${n}` : ""),
+        supplier: o.supplier || "",
+        amount: part.amount, due: part.due, status: "pendente", accountId: o.accountId || "",
+        category: "Compra de mercadoria", refKind: "entry", refId: o.entryId,
+        installment: part.i, installments: n, autoPay: !!o.autoPay, createdAt: Date.now()
+      });
+      created++;
+    }
+    await update(ref(db, "entries/" + o.entryId), { installments: n, firstDue: parts[0].due, autoPay: !!o.autoPay });
+  } catch (err) {
+    console.error("Falha ao gerar as parcelas em payables", err);
+    error = err?.message || String(err);
+  }
+  return { created, parts, error };
+}
+
+/* Entradas a prazo que ainda não possuem título no contas a pagar. */
+function entriesMissingPayables() {
+  const pays = list(STATE.payables);
+  return list(STATE.entries)
+    .filter(e => e.settlement === "prazo")
+    .filter(e => !pays.some(p => p.refKind === "entry" && p.refId === e.id));
+}
+
+/* Repara entradas a prazo sem título (falha de gravação, regras, offline etc.). */
+async function reconcilePayables(silent) {
+  const missing = entriesMissingPayables();
+  if (!missing.length) { if (!silent) toast("Todas as entradas a prazo já possuem título no contas a pagar", "ok"); return 0; }
+  let total = 0, lastError = "";
+  for (const e of missing) {
+    const r = await createPayablesForEntry({
+      entryId: e.id, productName: e.productName || "item", qty: num(e.qty), total: num(e.total),
+      n: num(e.installments) || 1, first: e.firstDue || e.date || todayISO(),
+      supplier: e.supplier || "", accountId: e.accountId || "", autoPay: !!e.autoPay
+    });
+    total += r.created;
+    if (r.error) lastError = r.error;
+  }
+  if (!silent) {
+    if (total) toast(`${total} título(s) gerados no contas a pagar`, "ok");
+    else toast(`Não foi possível gravar os títulos${lastError ? ": " + lastError : ""}`, "err");
+  }
+  return total;
 }
 
 /* Quita automaticamente as parcelas a pagar cuja data de vencimento chegou. */
@@ -1074,6 +1116,8 @@ function viewVendas(root) {
     </div>
     <div id="vBody" style="margin-top:12px"></div>
   </div>`;
+  const fixBtn = $("#payFix");
+  if (fixBtn) fixBtn.onclick = async () => { await reconcilePayables(false); renderView(); };
   let rows = [];
   const draw = () => {
     const q = ($("#v_q").value || "").toLowerCase();
@@ -1373,6 +1417,7 @@ function finLedger(el, kinds, title, pidBase, defaultKind) {
         <input id="${pidBase}_q" placeholder="Buscar descrição/pessoa">
         <button class="btn" id="${pidBase}_csv">CSV</button>
         <button class="btn" id="${pidBase}_pdf">PDF</button>
+        ${node === "payables" ? `<button class="btn" id="payFix">Gerar títulos faltantes</button>` : ""}
         <button class="btn btn-primary" id="${pidBase}_new">+ Novo lançamento</button>
       </div>
     </div>
@@ -1519,6 +1564,7 @@ function accountsPanel(el, node, title, doneStatus, partyLabel) {
         ${stat("Liquidado no período", money(rows.filter(r => r.status === doneStatus).reduce((s, r) => s + num(r.amount), 0)))}
         ${stat("Saldo total das contas", money(totalBalance()))}
       </div>
+      ${node === "payables" && entriesMissingPayables().length ? `<div class="alert" style="margin-bottom:12px">${entriesMissingPayables().length} entrada(s) a prazo do Estoque/Compras ainda sem título aqui. Clique em <strong>Gerar títulos faltantes</strong>.</div>` : ""}
       ${hidden ? `<div class="alert" style="margin-bottom:12px">${hidden} título(s) com vencimento fora do filtro <strong>${periodLabel(pid)}</strong> estão ocultos. Selecione <strong>Tudo</strong> no período para ver as parcelas futuras.</div>` : ""}
       ${rows.length ? tbl(["Vencimento", "Descrição", partyLabel, "Categoria", "Valor", "Situação", "Conta / liquidação", "Ações"],
       rows.map(r => {
