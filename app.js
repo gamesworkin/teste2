@@ -1442,7 +1442,7 @@ function accountsPanel(el, node, title, doneStatus, partyLabel) {
   <div class="card">
     <div class="card-head"><h3>${title}</h3><div style="flex:1"></div>
       <div class="toolbar">
-        ${periodBar(pid, "month")}
+        ${periodBar(pid, "all")}
         <select id="${pidBase}_st">
           <option value="">Todas as situações</option>
           <option value="pend">Em aberto</option>
@@ -1455,7 +1455,7 @@ function accountsPanel(el, node, title, doneStatus, partyLabel) {
         <button class="btn btn-primary" id="accNew">+ Novo lançamento</button>
       </div>
     </div>
-    <p class="muted">Os títulos filtram pelo vencimento (${periodLabel(pid)}). Ao liquidar, o valor entra ou sai da conta escolhida e o saldo é atualizado.</p>
+    <p class="muted">Filtro de vencimento: <strong>${periodLabel(pid)}</strong> — por padrão mostra <strong>todos</strong> os títulos, inclusive parcelas com vencimento em meses futuros. Ao liquidar, o valor entra ou sai da conta escolhida e o saldo é atualizado.</p>
     <div id="${pidBase}_body" style="margin-top:12px"></div>
   </div>`;
   let rows = [];
