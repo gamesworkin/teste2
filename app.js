@@ -1485,17 +1485,29 @@ function accountsPanel(el, node, title, doneStatus, partyLabel) {
       rows.map(r => {
         const done = r.status === doneStatus;
         const late = !done && (r.due || "") < todayISO();
-        return `<tr><td>${fmtDate(r.due)}</td><td>${esc(r.description)}</td>
+        const autoTag = r.autoPay ? ` <span class="pill" title="Será debitado automaticamente da conta na data do vencimento">débito automático</span>` : "";
+        const autoInfo = r.autoPay && !done
+          ? `<small class="muted">auto em ${fmtDate(r.due)} · ${esc(accName(r.accountId))}</small>`
+          : "—";
+        return `<tr><td>${fmtDate(r.due)}</td><td>${esc(r.description)}${autoTag}</td>
         <td>${esc(r.supplier || r.customer || "—")}</td><td>${esc(r.category || "—")}</td>
         <td class="right">${money(r.amount)}</td>
         <td><span class="pill ${done ? "ok" : late ? "dan" : "warn"}">${done ? doneStatus : late ? "vencido" : "pendente"}</span></td>
-        <td>${done ? `${esc(accName(r.accountId))}<br><small class="muted">${fmtDate(r.settledAt)}</small>` : "—"}</td>
+        <td>${done ? `${esc(accName(r.accountId))}<br><small class="muted">${fmtDate(r.settledAt)}${r.autoSettled ? " · automático" : ""}</small>` : autoInfo}</td>
         <td>${done ? `<button class="btn btn-sm" data-undo="${r.id}">Reabrir</button> ` :
-          `<button class="btn btn-sm btn-ok" data-ok="${r.id}">Liquidar</button> `}
+          `<button class="btn btn-sm btn-ok" data-ok="${r.id}">Liquidar</button> ` +
+          (node === "payables" ? `<button class="btn btn-sm" data-auto="${r.id}">${r.autoPay ? "Desligar auto" : "Ligar auto"}</button> ` : "")}
             <button class="btn btn-sm btn-danger" data-del="${r.id}">Excluir</button></td></tr>`;
       }).join("")) : `<div class="empty">Nenhum lançamento no período.</div>`}`;
 
     $$("[data-ok]", el).forEach(b => b.onclick = () => settleForm(node, b.dataset.ok, doneStatus));
+    $$("[data-auto]", el).forEach(b => b.onclick = async () => {
+      const r = STATE[node][b.dataset.auto] || {};
+      if (!r.autoPay && !r.accountId) return toast("Defina a conta do título (Liquidar) antes de ligar o débito automático", "err");
+      await update(ref(db, node + "/" + b.dataset.auto), { autoPay: !r.autoPay });
+      toast(!r.autoPay ? "Débito automático ligado" : "Débito automático desligado", "ok");
+    });
+
     $$("[data-undo]", el).forEach(b => b.onclick = () => confirmDialog("Reabrir o título e desfazer o lançamento no saldo?", async () => {
       await finRemoveByRef(node, b.dataset.undo);
       await update(ref(db, node + "/" + b.dataset.undo), { status: "pendente", settledAt: "", accountId: "" });
