@@ -857,6 +857,7 @@ function viewEstoque(root) {
         STATE.finTab = "pay";
         PERIOD_STORE["payPP"] = periodSeed("all");
         PAY_FORCE_ALL = true;
+        if (can("financeiro")) STATE.view = "financeiro";
         toast(n > 1
           ? `Entrada registrada · ${n} parcelas geradas no contas a pagar (venc. ${fmtDate(res.parts[0].due)} a ${fmtDate(res.parts[n - 1].due)})`
           : `Entrada registrada · conta a pagar gerada para ${fmtDate(res.parts[0].due)}`, "ok");
@@ -1116,8 +1117,6 @@ function viewVendas(root) {
     </div>
     <div id="vBody" style="margin-top:12px"></div>
   </div>`;
-  const fixBtn = $("#payFix");
-  if (fixBtn) fixBtn.onclick = async () => { await reconcilePayables(false); renderView(); };
   let rows = [];
   const draw = () => {
     const q = ($("#v_q").value || "").toLowerCase();
@@ -1417,7 +1416,6 @@ function finLedger(el, kinds, title, pidBase, defaultKind) {
         <input id="${pidBase}_q" placeholder="Buscar descrição/pessoa">
         <button class="btn" id="${pidBase}_csv">CSV</button>
         <button class="btn" id="${pidBase}_pdf">PDF</button>
-        ${node === "payables" ? `<button class="btn" id="payFix">Gerar títulos faltantes</button>` : ""}
         <button class="btn btn-primary" id="${pidBase}_new">+ Novo lançamento</button>
       </div>
     </div>
@@ -1526,6 +1524,7 @@ function accountsPanel(el, node, title, doneStatus, partyLabel) {
         <input id="${pidBase}_q" placeholder="Buscar descrição, ${partyLabel.toLowerCase()} ou categoria">
         <button class="btn" id="${pidBase}_csv">CSV</button>
         <button class="btn" id="${pidBase}_pdf">PDF</button>
+        ${node === "payables" ? `<button class="btn" id="payFix">Gerar títulos faltantes</button>` : ""}
         <button class="btn btn-primary" id="accNew">+ Novo lançamento</button>
       </div>
     </div>
@@ -1603,6 +1602,14 @@ function accountsPanel(el, node, title, doneStatus, partyLabel) {
       await remove(ref(db, node + "/" + b.dataset.del)); toast("Excluído", "ok");
     }));
   };
+  if (node === "payables") {
+    const fixBtn = $("#payFix");
+    if (fixBtn) fixBtn.onclick = async () => {
+      fixBtn.disabled = true;
+      try { await reconcilePayables(false); } finally { fixBtn.disabled = false; }
+      renderView();
+    };
+  }
   $("#accNew").onclick = () => accountForm(node, partyLabel);
   $("#" + pidBase + "_st").onchange = draw;
   $("#" + pidBase + "_q").oninput = draw;
