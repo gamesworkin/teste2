@@ -180,7 +180,11 @@ function can(p) { return STATE.isAdmin || p === "perfil" || p === "dashboard" ? 
 
 /* ================= Bindings do Realtime Database ================= */
 function bindNode(path, key, cb) {
-  const un = onValue(ref(db, path), s => { STATE[key] = s.val() || {}; cb && cb(); });
+  const un = onValue(ref(db, path), s => { STATE[key] = s.val() || {}; cb && cb(); },
+    err => {
+      console.error("Falha ao ler /" + path, err);
+      toast(`Sem permissão para ler "${path}" no banco. Ajuste as regras do Realtime Database.`, "err");
+    });
   STATE.unsubs.push(un);
 }
 function bindData() {
@@ -330,9 +334,15 @@ async function finRemoveByRef(refKind, refId) {
 /* ---- Filtros de período reutilizáveis: diário / mensal / anual / personalizado ---- */
 const PERIOD_STORE = {};
 const lastDayOfMonth = ym => new Date(+ym.slice(0, 4), +ym.slice(5, 7), 0).toISOString().slice(0, 10);
-function periodBar(id, def = "month") {
+function periodSeed(mode) {
   const t = todayISO();
-  const s = PERIOD_STORE[id] || (PERIOD_STORE[id] = { mode: def, from: t.slice(0, 8) + "01", to: lastDayOfMonth(t.slice(0, 7)) });
+  if (mode === "all") return { mode, from: "", to: "" };
+  if (mode === "day") return { mode, from: t, to: t };
+  if (mode === "year") return { mode, from: t.slice(0, 4) + "-01-01", to: t.slice(0, 4) + "-12-31" };
+  return { mode, from: t.slice(0, 8) + "01", to: lastDayOfMonth(t.slice(0, 7)) };
+}
+function periodBar(id, def = "month") {
+  const s = PERIOD_STORE[id] || (PERIOD_STORE[id] = periodSeed(def));
   return `<div class="toolbar" data-period="${id}">
     <select id="${id}_mode" title="Período">
       ${[["day", "Diário (hoje)"], ["month", "Mensal"], ["year", "Anual"], ["all", "Tudo"], ["custom", "Personalizado"]]
@@ -838,17 +848,30 @@ function viewEstoque(root) {
       const first = $("#e_first").value || eDate;
       const autoPay = $("#e_auto").value === "1";
       const parts = installmentPlan(total, n, first);
-      for (const part of parts) {
-        await push(ref(db, "payables"), {
-          description: `Compra ${p.name} (${q} un)` + (n > 1 ? ` — parcela ${part.i}/${n}` : ""),
-          supplier: $("#e_supplier").value.trim(),
-          amount: part.amount, due: part.due, status: "pendente", accountId: accId,
-          category: "Compra de mercadoria", refKind: "entry", refId: entRef.key,
-          installment: part.i, installments: n, autoPay, createdAt: Date.now()
-        });
+      let created = 0;
+      try {
+        for (const part of parts) {
+          await push(ref(db, "payables"), {
+            description: `Compra ${p.name} (${q} un)` + (n > 1 ? ` — parcela ${part.i}/${n}` : ""),
+            supplier: $("#e_supplier").value.trim(),
+            amount: part.amount, due: part.due, status: "pendente", accountId: accId || "",
+            category: "Compra de mercadoria", refKind: "entry", refId: entRef.key,
+            installment: part.i, installments: n, autoPay: !!autoPay, createdAt: Date.now()
+          });
+          created++;
+        }
+        await update(ref(db, "entries/" + entRef.key), { installments: n, firstDue: first, autoPay: !!autoPay });
+      } catch (err) {
+        console.error("Falha ao gerar as parcelas em payables", err);
+        toast(`Entrada salva, mas só ${created}/${parts.length} parcela(s) foram gravadas no contas a pagar: ${err?.message || err}`, "err");
       }
-      await update(ref(db, "entries/" + entRef.key), { installments: n, firstDue: first, autoPay });
-      toast(n > 1 ? `Entrada registrada · ${n} parcelas geradas no contas a pagar` : "Entrada registrada e conta a pagar gerada", "ok");
+      if (created === parts.length) {
+        // mostra o resultado já na aba certa do Financeiro
+        STATE.finTab = "pay";
+        toast(n > 1
+          ? `Entrada registrada · ${n} parcelas geradas no contas a pagar (venc. ${fmtDate(parts[0].due)} a ${fmtDate(parts[n - 1].due)})`
+          : `Entrada registrada · conta a pagar gerada para ${fmtDate(parts[0].due)}`, "ok");
+      }
     } else if (mode === "imediato" && accId) {
       await finAdd({
         date: eDate, kind: "compra", amount: total, accountId: accId,
@@ -894,6 +917,8 @@ async function autoSettleDuePayables() {
     for (const r of list(STATE.payables)) {
       if (r.status === "pago" || !r.autoPay || !r.accountId) continue;
       if (!r.due || r.due > t) continue;
+      // evita quitar no mesmo momento em que a parcela acabou de ser criada
+      if (r.createdAt && Date.now() - r.createdAt < 60000) continue;
       if (finList().some(f => f.refKind === "payables" && f.refId === r.id)) continue;
       await update(ref(db, "payables/" + r.id), {
         status: "pago", settledAt: r.due, settledAmount: num(r.amount), autoSettled: true
@@ -1461,7 +1486,9 @@ function accountsPanel(el, node, title, doneStatus, partyLabel) {
   let rows = [];
   const draw = () => {
     const stF = $("#" + pidBase + "_st").value, q = ($("#" + pidBase + "_q").value || "").toLowerCase();
-    const all = list(STATE[node]).filter(r => inPeriod(r.due, pid));
+    const everything = list(STATE[node]);
+    const all = everything.filter(r => !r.due || inPeriod(r.due, pid));
+    const hidden = everything.length - all.length;
     rows = all
       .filter(r => {
         const done = r.status === doneStatus, late = !done && (r.due || "") < todayISO();
@@ -1481,6 +1508,7 @@ function accountsPanel(el, node, title, doneStatus, partyLabel) {
         ${stat("Liquidado no período", money(rows.filter(r => r.status === doneStatus).reduce((s, r) => s + num(r.amount), 0)))}
         ${stat("Saldo total das contas", money(totalBalance()))}
       </div>
+      ${hidden ? `<div class="alert" style="margin-bottom:12px">${hidden} título(s) com vencimento fora do filtro <strong>${periodLabel(pid)}</strong> estão ocultos. Selecione <strong>Tudo</strong> no período para ver as parcelas futuras.</div>` : ""}
       ${rows.length ? tbl(["Vencimento", "Descrição", partyLabel, "Categoria", "Valor", "Situação", "Conta / liquidação", "Ações"],
       rows.map(r => {
         const done = r.status === doneStatus;
