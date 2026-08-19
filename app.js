@@ -8,7 +8,8 @@ import {
   sendPasswordResetEmail, createUserWithEmailAndPassword, updateProfile
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
-  getDatabase, ref, set, get, push, update, remove, onValue
+  getDatabase, ref, set, get, push, update, remove, onValue, onDisconnect,
+  query, orderByChild, limitToLast, serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
 /* ------------------------------------------------------------------
@@ -87,7 +88,7 @@ const STATE = {
 const PERMS = [
   ["dashboard", "Dashboard"], ["produtos", "Cadastro de Itens"], ["kits", "Kits"],
   ["estoque", "Estoque / Compras"], ["vendas", "Vendas"], ["financeiro", "Financeiro"],
-  ["despesas", "Despesas Gerais"], ["relatorios", "Relatórios"],
+  ["despesas", "Despesas Gerais"], ["relatorios", "Relatórios"], ["mensagens", "Mensagens"],
   ["usuarios", "Usuários & Permissões"], ["config", "Configurações"]
 ];
 
@@ -140,6 +141,7 @@ $("#logoutBtn").onclick = () => signOut(auth);
 onAuthStateChanged(auth, async user => {
   STATE.unsubs.forEach(u => u()); STATE.unsubs = [];
   if (!user) {
+    stopMessaging();
     STATE.user = null;
     $("#app").classList.add("hidden");
     $("#loginScreen").classList.remove("hidden");
@@ -173,6 +175,7 @@ onAuthStateChanged(auth, async user => {
   $("#app").classList.remove("hidden");
   $("#loginPass").value = "";
   bindData();
+  startMessaging();
   renderShell();
 });
 
@@ -193,10 +196,17 @@ function bindData() {
     renderView();
     reconcilePayables(true).then(nCreated => { if (nCreated) renderView(); });
     autoSettleDuePayables();
+    autoSettleDueReceivables();
     checkReceivableAlerts();
   };
   ["products", "kits", "entries", "sales", "payables", "receivables", "expenses", "users", "settings", "accounts", "fin"]
     .forEach(k => bindNode(k, k, rerender));
+  // mantém o perfil (permissões, cargo de chat, silenciamento) sempre atualizado
+  bindNode("users", "users", () => {
+    const me = STATE.users[STATE.user?.uid];
+    if (me) { STATE.profile = { ...STATE.profile, ...me }; STATE.perms = me.perms || STATE.perms; }
+    refreshMsgBadge();
+  });
   STATE.ready = true;
 }
 function loadPublicSettings() {
@@ -219,6 +229,7 @@ function renderShell() {
     b.classList.toggle("hidden", !can(b.dataset.perm));
     b.onclick = () => { STATE.view = b.dataset.view; $("#sidebar").classList.remove("open"); renderView(); };
   });
+  refreshMsgBadge();
   renderView();
 }
 function applySettingsUI() {
@@ -231,7 +242,8 @@ const VIEWS = {
   dashboard: ["Dashboard", viewDashboard], produtos: ["Cadastro de Itens", viewProdutos],
   kits: ["Kits", viewKits], estoque: ["Estoque / Compras", viewEstoque], vendas: ["Vendas", viewVendas],
   financeiro: ["Financeiro", viewFinanceiro], despesas: ["Despesas Gerais", viewDespesas],
-  relatorios: ["Relatórios", viewRelatorios], usuarios: ["Usuários & Permissões", viewUsuarios],
+  relatorios: ["Relatórios", viewRelatorios], mensagens: ["Mensagens", viewMensagens],
+  usuarios: ["Usuários & Permissões", viewUsuarios],
   perfil: ["Perfil", viewPerfil], config: ["Configurações", viewConfig]
 };
 function renderView() {
@@ -689,6 +701,8 @@ function viewEstoque(root) {
       <label class="field hidden" id="e_autoWrap"><span>Débito das parcelas</span><select id="e_auto">
         <option value="0" selected>Manual — fica em aberto no Contas a pagar</option>
         <option value="1">Automático — quita na data do vencimento</option></select></label>
+      <label class="field"><span>Juros/desconto cartão de crédito (%)</span>
+        <input id="e_juros" type="number" step="0.01" value="0" placeholder="Ex.: 2,99 = juros · -3 = desconto"></label>
       <div class="hidden" id="e_instPrev" style="grid-column:1/-1"></div>
     </div>
     <div class="card" style="margin-top:12px;background:var(--panel-2)"><div id="e_preview" class="muted">Preencha os campos para ver a simulação do novo custo médio.</div></div>
@@ -803,7 +817,7 @@ function viewEstoque(root) {
     const q = num($("#e_qty").value);
     const freight = num($("#e_freight").value);
     const unit = num($("#e_unit").value) || (q ? (num($("#e_total").value) + freight) / q : 0);
-    const total = unit * q;
+    const total = withRate(unit * q, num($("#e_juros").value));
     const n = Math.max(1, Math.min(12, parseInt($("#e_inst").value) || 1));
     const first = $("#e_first").value || $("#e_date").value || todayISO();
     const parts = installmentPlan(total, n, first);
@@ -814,7 +828,7 @@ function viewEstoque(root) {
         : "As parcelas ficam em aberto no Contas a pagar para quitação manual."}</div></div>`
       : `<div class="muted">Informe quantidade e valor para simular as parcelas.</div>`;
   };
-  ["e_pay", "e_inst", "e_first", "e_auto", "e_qty", "e_total", "e_unit", "e_freight", "e_date"].forEach(i => {
+  ["e_pay", "e_inst", "e_first", "e_auto", "e_juros", "e_qty", "e_total", "e_unit", "e_freight", "e_date"].forEach(i => {
     $("#" + i).addEventListener("change", instPreview); $("#" + i).addEventListener("input", instPreview);
   });
   $("#e_date").addEventListener("change", () => { if (!$("#e_first").dataset.touched) $("#e_first").value = addMonthsISO($("#e_date").value || todayISO(), 1); instPreview(); });
@@ -830,6 +844,8 @@ function viewEstoque(root) {
     const unit = num($("#e_unit").value) || (num($("#e_total").value) + freight) / q;
     if (unit <= 0) return toast("Informe o valor da compra", "err");
     const total = unit * q;
+    const jurosPct = num($("#e_juros").value);
+    const finTotal = withRate(total, jurosPct);
     const prevAvg = num(p.avgCost), prevQty = num(p.qty);
     const newQty = prevQty + q;
     const newAvg = (prevQty * prevAvg + q * unit) / newQty;
@@ -841,6 +857,7 @@ function viewEstoque(root) {
       productId: pid, productName: p.name, qty: q, unitCost: Number(unit.toFixed(4)), total,
       freight, prevAvg, newAvg: Number(newAvg.toFixed(4)), supplier: $("#e_supplier").value.trim(),
       doc: $("#e_doc").value.trim(), date: eDate, settlement: mode,
+      cardRate: jurosPct, financeTotal: finTotal,
       accountId: mode === "imediato" ? accId : "", createdAt: Date.now(),
       user: STATE.user.email
     });
@@ -849,7 +866,7 @@ function viewEstoque(root) {
       const first = $("#e_first").value || eDate;
       const autoPay = $("#e_auto").value === "1";
       const res = await createPayablesForEntry({
-        entryId: entRef.key, productName: p.name, qty: q, total, n, first,
+        entryId: entRef.key, productName: p.name, qty: q, total: finTotal, n, first,
         supplier: $("#e_supplier").value.trim(), accountId: accId || "", autoPay
       });
       if (res.created > 0) {
@@ -866,11 +883,11 @@ function viewEstoque(root) {
       }
     } else if (mode === "imediato" && accId) {
       await finAdd({
-        date: eDate, kind: "compra", amount: total, accountId: accId,
+        date: eDate, kind: "compra", amount: finTotal, accountId: accId,
         description: `Compra ${p.name} (${q} un)`, party: $("#e_supplier").value.trim(),
         refKind: "entry", refId: entRef.key
       });
-      toast(`Entrada registrada · ${money(total)} debitado de ${accName(accId)}`, "ok");
+      toast(`Entrada registrada · ${money(finTotal)} debitado de ${accName(accId)}`, "ok");
     } else {
       toast(`Entrada registrada. Novo custo médio: ${money(newAvg)}`, "ok");
     }
@@ -880,6 +897,11 @@ function viewEstoque(root) {
 }
 
 /* ================= PARCELAMENTO / AUTOMAÇÕES DE TÍTULOS ================= */
+/* Aplica juros (+) ou desconto (-) percentual — usado na modalidade cartão de crédito. */
+function withRate(total, ratePct) {
+  const v = num(total) * (1 + num(ratePct) / 100);
+  return Number(v.toFixed(2));
+}
 /* Divide um total em N parcelas mensais a partir de uma data (ajusta centavos na última). */
 function installmentPlan(total, n, firstDue) {
   n = Math.max(1, Math.min(12, parseInt(n) || 1));
@@ -980,6 +1002,33 @@ async function autoSettleDuePayables() {
   finally { AUTO_PAY_RUNNING = false; }
 }
 
+/* Credita automaticamente as parcelas a receber com quitação automática vencidas. */
+let AUTO_REC_RUNNING = false;
+async function autoSettleDueReceivables() {
+  if (AUTO_REC_RUNNING) return;
+  AUTO_REC_RUNNING = true;
+  try {
+    const t = todayISO();
+    for (const r of list(STATE.receivables)) {
+      if (r.status === "recebido" || !r.autoPay || !r.accountId) continue;
+      if (!r.due || r.due > t) continue;
+      if (r.createdAt && new Date(r.createdAt).toISOString().slice(0, 10) >= t) continue;
+      if (finList().some(f => f.refKind === "receivables" && f.refId === r.id)) continue;
+      await update(ref(db, "receivables/" + r.id), {
+        status: "recebido", settledAt: r.due, settledAmount: num(r.amount), autoSettled: true
+      });
+      await finAdd({
+        date: r.due, kind: r.category === "Venda" ? "venda" : "ajuste_in", dir: "in",
+        accountId: r.accountId, amount: num(r.amount), description: r.description,
+        party: r.customer || "", category: r.category || "Recebimento",
+        refKind: "receivables", refId: r.id
+      });
+      toast(`Parcela recebida automaticamente: ${r.description} · ${money(r.amount)}`, "ok");
+    }
+  } catch (e) { console.warn(e); }
+  finally { AUTO_REC_RUNNING = false; }
+}
+
 /* Alerta de títulos a receber vencidos/vencendo: quitar ou postergar. */
 const RECV_SNOOZE = new Set();
 let RECV_ALERT_OPEN = false;
@@ -989,6 +1038,7 @@ function checkReceivableAlerts() {
   const t = todayISO();
   const r = list(STATE.receivables)
     .filter(x => x.status !== "recebido" && x.due && x.due <= t && !RECV_SNOOZE.has(x.id))
+    .filter(x => !(x.autoPay && x.accountId))
     .sort((a, b) => (a.due || "").localeCompare(b.due || ""))[0];
   if (!r) return;
   RECV_ALERT_OPEN = true;
@@ -1192,7 +1242,17 @@ function saleForm() {
         <option value="imediato">À vista — credita no saldo agora</option>
         <option value="prazo">A prazo — gera conta a receber</option></select></label>
       <label class="field"><span>Conta de destino</span><select id="s_acc">${accountOptions(defaultAccount())}</select></label>
+      <label class="field"><span>Juros/desconto cartão de crédito (%)</span>
+        <input id="s_juros" type="number" step="0.01" value="0" placeholder="Ex.: 2,99 = juros · -3 = desconto"></label>
+      <label class="field hidden" id="s_instWrap"><span>Parcelas (a prazo)</span>
+        <select id="s_inst">${Array.from({ length: 12 }, (_, i) => `<option value="${i + 1}">${i + 1}x</option>`).join("")}</select></label>
+      <label class="field hidden" id="s_firstWrap"><span>Vencimento da 1ª parcela</span>
+        <input id="s_first" type="date" value="${addMonthsISO(todayISO(), 1)}"></label>
+      <label class="field hidden" id="s_autoWrap"><span>Recebimento das parcelas</span><select id="s_auto">
+        <option value="0" selected>Manual — fica em aberto no Contas a receber</option>
+        <option value="1">Automático — quita na data do vencimento</option></select></label>
     </div>
+    <div class="hidden" id="s_instPrev" style="margin-top:8px"></div>
     <div class="section-title">Itens da venda</div>
     <div class="toolbar">
       <select id="s_item" style="flex:1">${opts}</select>
@@ -1214,9 +1274,13 @@ function saleForm() {
     $$("[data-price]", $("#s_list")).forEach(inp => inp.onchange = () => { items[+inp.dataset.price].price = num(inp.value); draw(); });
     const sub = items.reduce((s, i) => s + num(i.price) * num(i.qty), 0);
     const cost = items.reduce((s, i) => s + num(i.cost) * num(i.qty), 0);
-    const total = sub - num($("#s_disc").value) + num($("#s_freight").value);
+    const base = sub - num($("#s_disc").value) + num($("#s_freight").value);
+    const rate = num($("#s_juros").value);
+    const total = withRate(base, rate);
     $("#s_total").textContent = money(total);
-    $("#s_info").textContent = `Custo ${money(cost)} · Lucro estimado ${money(total - cost)}`;
+    $("#s_info").textContent = `Custo ${money(cost)} · Lucro estimado ${money(total - cost)}`
+      + (rate ? ` · ${rate > 0 ? "juros" : "desconto"} de cartão ${pct(Math.abs(rate))} (${money(total - base)})` : "");
+    saleInstPreview(total);
   };
   $("#s_add").onclick = () => {
     const v = $("#s_item").value; if (!v) return toast("Cadastre produtos ou kits", "err");
@@ -1225,7 +1289,27 @@ function saleForm() {
     else { const k = STATE.kits[id]; items.push({ type: "kit", id, name: "[KIT] " + k.name, qty: q, price: num(k.price), cost: kitCost(k) }); }
     draw();
   };
-  $("#s_disc").oninput = draw; $("#s_freight").oninput = draw;
+  const saleInstPreview = (total) => {
+    const prazo = $("#s_rec").value === "prazo";
+    ["s_instWrap", "s_firstWrap", "s_autoWrap", "s_instPrev"].forEach(id => $("#" + id).classList.toggle("hidden", !prazo));
+    if (!prazo) return;
+    const n = Math.max(1, Math.min(12, parseInt($("#s_inst").value) || 1));
+    const first = $("#s_first").value || $("#s_date").value || todayISO();
+    const parts = installmentPlan(total, n, first);
+    $("#s_instPrev").innerHTML = total > 0
+      ? `<div class="card" style="background:var(--panel-2)"><strong>Parcelamento:</strong> ${n}x · ${parts.map(x => `${fmtDate(x.due)} — ${money(x.amount)}`).join(" · ")}
+         <div class="muted" style="margin-top:6px">${$("#s_auto").value === "1"
+        ? "Cada parcela será creditada automaticamente na conta escolhida na data do vencimento."
+        : "As parcelas ficam em aberto no Contas a receber para quitação manual."}</div></div>`
+      : `<div class="muted">Adicione itens para simular as parcelas.</div>`;
+  };
+  ["s_disc", "s_freight", "s_juros"].forEach(i => $("#" + i).oninput = draw);
+  ["s_rec", "s_inst", "s_first", "s_auto", "s_date", "s_pay"].forEach(i => $("#" + i).addEventListener("change", draw));
+  $("#s_date").addEventListener("change", () => { if (!$("#s_first").dataset.touched) $("#s_first").value = addMonthsISO($("#s_date").value || todayISO(), 1); });
+  $("#s_first").addEventListener("change", () => { $("#s_first").dataset.touched = "1"; });
+  $("#s_pay").addEventListener("change", () => {
+    if ($("#s_pay").value === "A prazo") { $("#s_rec").value = "prazo"; draw(); }
+  });
   draw();
 
   $("#mCancel").onclick = closeModal;
@@ -1233,7 +1317,8 @@ function saleForm() {
     if (!items.length) return toast("Adicione itens à venda", "err");
     const sub = items.reduce((s, i) => s + num(i.price) * num(i.qty), 0);
     const cost = items.reduce((s, i) => s + num(i.cost) * num(i.qty), 0);
-    const total = sub - num($("#s_disc").value) + num($("#s_freight").value);
+    const cardRate = num($("#s_juros").value);
+    const total = withRate(sub - num($("#s_disc").value) + num($("#s_freight").value), cardRate);
     // baixa de estoque
     const updates = {};
     for (const it of items) {
@@ -1253,6 +1338,7 @@ function saleForm() {
     const sale = {
       customer: $("#s_customer").value.trim(), date: $("#s_date").value || todayISO(),
       payment: $("#s_pay").value, discount: num($("#s_disc").value), freight: num($("#s_freight").value),
+      cardRate,
       items, subtotal: sub, cost, total, user: STATE.user.email, createdAt: Date.now()
     };
     const settlement = $("#s_rec").value;
@@ -1260,12 +1346,23 @@ function saleForm() {
     sale.settlement = settlement; sale.accountId = settlement === "imediato" ? accId : "";
     const saleRef = await push(ref(db, "sales"), sale);
     if (settlement === "prazo") {
-      await push(ref(db, "receivables"), {
-        description: "Venda " + (sale.customer || "balcão"), customer: sale.customer,
-        amount: total, due: sale.date, status: "pendente", category: "Venda",
-        accountId: accId, refKind: "sale", refId: saleRef.key, createdAt: Date.now()
-      });
-      toast("Venda registrada e conta a receber gerada", "ok");
+      const n = Math.max(1, Math.min(12, parseInt($("#s_inst").value) || 1));
+      const first = $("#s_first").value || sale.date;
+      const autoReceive = $("#s_auto").value === "1";
+      const parts = installmentPlan(total, n, first);
+      for (const part of parts) {
+        await push(ref(db, "receivables"), {
+          description: "Venda " + (sale.customer || "balcão") + (n > 1 ? ` — parcela ${part.i}/${n}` : ""),
+          customer: sale.customer, amount: part.amount, due: part.due, status: "pendente",
+          category: "Venda", accountId: accId, refKind: "sale", refId: saleRef.key,
+          installment: part.i, installments: n, autoPay: autoReceive, createdAt: Date.now()
+        });
+      }
+      await update(ref(db, "sales/" + saleRef.key), { installments: n, firstDue: parts[0].due, autoPay: autoReceive });
+      STATE.finTab = "rec";
+      toast(n > 1
+        ? `Venda registrada · ${n} parcelas geradas no contas a receber (venc. ${fmtDate(parts[0].due)} a ${fmtDate(parts[n - 1].due)})`
+        : "Venda registrada e conta a receber gerada", "ok");
     } else if (accId) {
       await finAdd({
         date: sale.date, kind: "venda", amount: total, accountId: accId,
@@ -1569,7 +1666,7 @@ function accountsPanel(el, node, title, doneStatus, partyLabel) {
       rows.map(r => {
         const done = r.status === doneStatus;
         const late = !done && (r.due || "") < todayISO();
-        const autoTag = r.autoPay ? ` <span class="pill" title="Será debitado automaticamente da conta na data do vencimento">débito automático</span>` : "";
+        const autoTag = r.autoPay ? ` <span class="pill" title="Será liquidado automaticamente na conta escolhida, na data do vencimento">${node === "payables" ? "débito automático" : "recebimento automático"}</span>` : "";
         const autoInfo = r.autoPay && !done
           ? `<small class="muted">auto em ${fmtDate(r.due)} · ${esc(accName(r.accountId))}</small>`
           : "—";
@@ -1580,16 +1677,17 @@ function accountsPanel(el, node, title, doneStatus, partyLabel) {
         <td>${done ? `${esc(accName(r.accountId))}<br><small class="muted">${fmtDate(r.settledAt)}${r.autoSettled ? " · automático" : ""}</small>` : autoInfo}</td>
         <td>${done ? `<button class="btn btn-sm" data-undo="${r.id}">Reabrir</button> ` :
           `<button class="btn btn-sm btn-ok" data-ok="${r.id}">Liquidar</button> ` +
-          (node === "payables" ? `<button class="btn btn-sm" data-auto="${r.id}">${r.autoPay ? "Desligar auto" : "Ligar auto"}</button> ` : "")}
+          `<button class="btn btn-sm" data-auto="${r.id}">${r.autoPay ? "Desligar auto" : "Ligar auto"}</button> `}
             <button class="btn btn-sm btn-danger" data-del="${r.id}">Excluir</button></td></tr>`;
       }).join("")) : `<div class="empty">Nenhum lançamento no período.</div>`}`;
 
     $$("[data-ok]", el).forEach(b => b.onclick = () => settleForm(node, b.dataset.ok, doneStatus));
     $$("[data-auto]", el).forEach(b => b.onclick = async () => {
       const r = STATE[node][b.dataset.auto] || {};
-      if (!r.autoPay && !r.accountId) return toast("Defina a conta do título (Liquidar) antes de ligar o débito automático", "err");
+      if (!r.autoPay && !r.accountId) return toast("Defina a conta do título antes de ligar a quitação automática", "err");
       await update(ref(db, node + "/" + b.dataset.auto), { autoPay: !r.autoPay });
-      toast(!r.autoPay ? "Débito automático ligado" : "Débito automático desligado", "ok");
+      toast(!r.autoPay ? "Quitação automática ligada" : "Quitação automática desligada", "ok");
+      autoSettleDuePayables(); autoSettleDueReceivables();
     });
 
     $$("[data-undo]", el).forEach(b => b.onclick = () => confirmDialog("Reabrir o título e desfazer o lançamento no saldo?", async () => {
@@ -1659,7 +1757,13 @@ function accountForm(node, partyLabel) {
       <label class="field"><span>Valor (R$) *</span><input id="a_amount" type="number" step="0.01"></label>
       <label class="field"><span>Vencimento</span><input id="a_due" type="date" value="${todayISO()}"></label>
       <label class="field"><span>Categoria</span><input id="a_cat" placeholder="Ex.: Fornecedor, Aluguel, Serviço"></label>
-      <label class="field"><span>Parcelas (repetir mensalmente)</span><input id="a_inst" type="number" value="1" min="1"></label>
+      <label class="field"><span>Parcelas (repetir mensalmente, até 12x)</span>
+        <select id="a_inst">${Array.from({ length: 12 }, (_, i) => `<option value="${i + 1}">${i + 1}x</option>`).join("")}</select></label>
+      <label class="field"><span>Juros/desconto cartão de crédito (%)</span>
+        <input id="a_juros" type="number" step="0.01" value="0" placeholder="Ex.: 2,99 = juros · -3 = desconto"></label>
+      <label class="field"><span>Quitação automática</span><select id="a_auto">
+        <option value="0" selected>Manual — liquidar no botão Liquidar</option>
+        <option value="1">Automática — na data do vencimento (exige conta prevista)</option></select></label>
       <label class="field"><span>Conta prevista</span><select id="a_acc"><option value="">Definir na liquidação</option>${accountOptions()}</select></label>
     </div>
     <label class="field"><span>Observações</span><textarea id="a_notes"></textarea></label>
@@ -1668,15 +1772,19 @@ function accountForm(node, partyLabel) {
   $("#mSave").onclick = async () => {
     const d = $("#a_desc").value.trim(), amount = num($("#a_amount").value);
     if (!d || !amount) return toast("Informe descrição e valor", "err");
-    const n = Math.max(1, parseInt($("#a_inst").value) || 1);
-    for (let i = 0; i < n; i++) {
-      const due = new Date($("#a_due").value || todayISO());
-      due.setMonth(due.getMonth() + i);
+    const n = Math.max(1, Math.min(12, parseInt($("#a_inst").value) || 1));
+    const autoPay = $("#a_auto").value === "1";
+    const accId = $("#a_acc").value;
+    if (autoPay && !accId) return toast("Escolha a conta prevista para usar a quitação automática", "err");
+    const totalWithRate = withRate(amount * n, num($("#a_juros").value));
+    const parts = installmentPlan(totalWithRate, n, $("#a_due").value || todayISO());
+    for (const part of parts) {
       await push(ref(db, node), {
-        description: n > 1 ? `${d} (${i + 1}/${n})` : d,
+        description: n > 1 ? `${d} (${part.i}/${n})` : d,
         [node === "payables" ? "supplier" : "customer"]: $("#a_party").value.trim(),
-        amount, due: due.toISOString().slice(0, 10), category: $("#a_cat").value.trim(),
-        accountId: $("#a_acc").value, notes: $("#a_notes").value.trim(), status: "pendente", createdAt: Date.now()
+        amount: part.amount, due: part.due, category: $("#a_cat").value.trim(),
+        accountId: accId, notes: $("#a_notes").value.trim(), status: "pendente",
+        installment: part.i, installments: n, autoPay, cardRate: num($("#a_juros").value), createdAt: Date.now()
       });
     }
     closeModal(); toast("Lançamento salvo", "ok");
@@ -2203,4 +2311,462 @@ function viewConfig(root) {
     a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
     a.download = `backup_${todayISO()}.json`; a.click();
   };
+}
+
+/* ==========================================================================
+   MENSAGENS — E-mail interno + Chat online (Firebase Auth + Realtime Database)
+   Estrutura no Realtime Database:
+     presence/{uid}          -> { online, name, email, at, lastSeen }
+     mail/{uid}/{box}/{id}   -> { from, fromName, to[], toNames, subject, body, at, read, starred }
+                                box = inbox | sent | drafts | trash
+     chats/{chatId}          -> { type: direct|group, name, members:{uid:true}, createdBy, createdAt, lastAt, lastText }
+     chatMessages/{chatId}/{msgId} -> { uid, name, text, at, deleted, deletedBy }
+     users/{uid}.chatRole    -> "moderador" | "membro"   (gerenciado pelo admin)
+     users/{uid}.chatMuted / .chatBanned -> boolean
+   ========================================================================== */
+const MSG = { tab: "mail", box: "inbox", chatId: null, mail: {}, chats: {}, presence: {}, msgs: {}, unsubs: [], msgUnsub: null };
+
+function msgClear() {
+  MSG.unsubs.forEach(u => { try { u(); } catch (e) {} });
+  MSG.unsubs = [];
+  if (MSG.msgUnsub) { try { MSG.msgUnsub(); } catch (e) {} MSG.msgUnsub = null; }
+  MSG.mail = {}; MSG.chats = {}; MSG.presence = {}; MSG.msgs = {}; MSG.chatId = null;
+}
+
+function myName(u = STATE.profile, email = STATE.user?.email) {
+  return (((u?.firstName || "") + " " + (u?.lastName || "")).trim()) || email || "Usuário";
+}
+function userName(uid) {
+  const u = STATE.users[uid];
+  if (!u) return MSG.presence[uid]?.name || "Usuário";
+  return (((u.firstName || "") + " " + (u.lastName || "")).trim()) || u.email || "Usuário";
+}
+function isOnline(uid) { return !!MSG.presence[uid]?.online; }
+function isChatMod() { return STATE.isAdmin || (STATE.profile?.chatRole === "moderador"); }
+function canChat() { return !(STATE.profile?.chatBanned); }
+function fmtWhen(ts) {
+  if (!ts) return "—";
+  const d = new Date(ts), t = new Date();
+  const sameDay = d.toDateString() === t.toDateString();
+  return sameDay ? d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })
+    : d.toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+function mailUnread() {
+  return Object.values(MSG.mail.inbox || {}).filter(m => !m.read).length;
+}
+function chatUnread() {
+  const uid = STATE.user?.uid;
+  return list(MSG.chats).filter(c => (c.members || {})[uid])
+    .filter(c => c.lastAt && c.lastAt > (STATE.profile?.chatSeen?.[c.id] || 0) && c.lastBy !== uid).length;
+}
+function refreshMsgBadge() {
+  const b = document.querySelector('#nav .nav-item[data-view="mensagens"] .badge');
+  const n = mailUnread() + chatUnread();
+  if (b) { b.textContent = n > 99 ? "99+" : String(n); b.classList.toggle("hidden", !n); }
+}
+
+/* ---------- presença online ---------- */
+function startMessaging() {
+  const user = STATE.user; if (!user) return;
+  msgClear();
+  const meRef = ref(db, "presence/" + user.uid);
+  const info = { name: myName(), email: user.email };
+  const un = onValue(ref(db, ".info/connected"), snap => {
+    if (snap.val() === false) return;
+    onDisconnect(meRef).set({ ...info, online: false, lastSeen: Date.now() })
+      .then(() => set(meRef, { ...info, online: true, at: Date.now() }))
+      .catch(e => console.warn("presença", e));
+  });
+  MSG.unsubs.push(un);
+  window.addEventListener("beforeunload", () => { try { set(meRef, { ...info, online: false, lastSeen: Date.now() }); } catch (e) {} });
+
+  const bind = (path, key) => {
+    const u = onValue(ref(db, path), s => {
+      MSG[key] = s.val() || {};
+      refreshMsgBadge();
+      if (STATE.view === "mensagens") renderMensagensBody();
+    }, err => console.warn("Sem permissão para ler /" + path, err));
+    MSG.unsubs.push(u);
+  };
+  bind("mail/" + user.uid, "mail");
+  bind("chats", "chats");
+  bind("presence", "presence");
+}
+async function stopMessaging() {
+  const uid = STATE.user?.uid;
+  if (uid) { try { await set(ref(db, "presence/" + uid), { name: myName(), email: STATE.user.email, online: false, lastSeen: Date.now() }); } catch (e) {} }
+  msgClear();
+}
+
+/* ================= VIEW PRINCIPAL ================= */
+function viewMensagens(root) {
+  root.innerHTML = `
+    <div class="tabs">
+      <button class="tab" data-mt="mail">✉ Caixa de e-mail</button>
+      <button class="tab" data-mt="chat">💬 Chat online</button>
+      ${isChatMod() ? `<button class="tab" data-mt="admin">🛡 Moderação & usuários</button>` : ""}
+    </div>
+    <div id="msgBody"></div>`;
+  $$(".tab", root).forEach(b => b.onclick = () => { MSG.tab = b.dataset.mt; renderMensagensBody(); });
+  renderMensagensBody();
+}
+function renderMensagensBody() {
+  const el = $("#msgBody"); if (!el) return;
+  if (MSG.tab === "admin" && !isChatMod()) MSG.tab = "mail";
+  $$("#content .tab").forEach(b => b.classList.toggle("active", b.dataset.mt === MSG.tab));
+  if (MSG.tab === "mail") mailView(el);
+  else if (MSG.tab === "chat") chatView(el);
+  else chatAdminView(el);
+}
+
+/* ================= E-MAIL INTERNO ================= */
+const MAIL_BOXES = [["inbox", "Caixa de entrada", "📥"], ["sent", "Enviados", "📤"],
+["drafts", "Rascunhos", "📝"], ["starred", "Favoritos", "★"], ["trash", "Lixeira", "🗑"]];
+
+function mailList(box) {
+  if (box === "starred") {
+    return [...list(MSG.mail.inbox || {}).map(m => ({ ...m, _box: "inbox" })),
+    ...list(MSG.mail.sent || {}).map(m => ({ ...m, _box: "sent" }))].filter(m => m.starred);
+  }
+  return list(MSG.mail[box] || {}).map(m => ({ ...m, _box: box }));
+}
+function mailView(el) {
+  const box = MSG.box;
+  const rows = mailList(box).sort((a, b) => (b.at || 0) - (a.at || 0));
+  el.innerHTML = `
+  <div class="msg-layout">
+    <aside class="card msg-side">
+      <button class="btn btn-primary btn-block" id="mailNew">✎ Escrever e-mail</button>
+      <div class="msg-folders">
+        ${MAIL_BOXES.map(([k, l, ic]) => {
+          const n = k === "inbox" ? mailUnread() : mailList(k).length;
+          return `<button class="msg-folder ${k === box ? "active" : ""}" data-box="${k}">
+            <span>${ic} ${l}</span>${n ? `<span class="pill">${n}</span>` : ""}</button>`;
+        }).join("")}
+      </div>
+      <p class="muted" style="margin-top:10px">Mensagens internas entre os usuários do sistema, salvas no Realtime Database.</p>
+    </aside>
+    <section class="card msg-main">
+      <div class="card-head"><h3>${MAIL_BOXES.find(b => b[0] === box)[1]}</h3><div style="flex:1"></div>
+        <div class="toolbar"><input id="mailQ" placeholder="Buscar assunto, remetente ou texto" style="min-width:220px"></div>
+      </div>
+      <div id="mailRows" style="margin-top:12px"></div>
+    </section>
+  </div>`;
+  $$("[data-box]", el).forEach(b => b.onclick = () => { MSG.box = b.dataset.box; renderMensagensBody(); });
+  $("#mailNew").onclick = () => mailCompose();
+
+  const draw = () => {
+    const q = ($("#mailQ").value || "").toLowerCase();
+    const data = rows.filter(m => !q || [m.subject, m.body, m.fromName, m.toNames].some(v => (v || "").toLowerCase().includes(q)));
+    $("#mailRows").innerHTML = data.length ? `<div class="mail-list">${data.map(m => `
+      <div class="mail-row ${m.read || box === "sent" || box === "drafts" ? "" : "unread"}" data-open="${m._box}:${m.id}">
+        <button class="star ${m.starred ? "on" : ""}" data-star="${m._box}:${m.id}" title="Favoritar">★</button>
+        <div class="mail-who">${esc(box === "sent" || box === "drafts" ? "Para: " + (m.toNames || "—") : (m.fromName || "—"))}</div>
+        <div class="mail-sub"><strong>${esc(m.subject || "(sem assunto)")}</strong>
+          <span class="muted"> — ${esc((m.body || "").slice(0, 80))}</span></div>
+        <div class="mail-date muted">${fmtWhen(m.at)}</div>
+        <button class="btn btn-sm btn-danger" data-mdel="${m._box}:${m.id}">${box === "trash" ? "Excluir" : "Lixeira"}</button>
+      </div>`).join("")}</div>`
+      : `<div class="empty">Nenhuma mensagem nesta pasta.</div>`;
+
+    $$("[data-open]", el).forEach(r => r.onclick = ev => {
+      if (ev.target.closest("button")) return;
+      const [b, id] = r.dataset.open.split(":"); mailOpen(b, id);
+    });
+    $$("[data-star]", el).forEach(b => b.onclick = async () => {
+      const [bx, id] = b.dataset.star.split(":");
+      const m = (MSG.mail[bx] || {})[id] || {};
+      await update(ref(db, `mail/${STATE.user.uid}/${bx}/${id}`), { starred: !m.starred });
+    });
+    $$("[data-mdel]", el).forEach(b => b.onclick = async () => {
+      const [bx, id] = b.dataset.mdel.split(":");
+      const m = (MSG.mail[bx] || {})[id]; if (!m) return;
+      if (bx === "trash") { await remove(ref(db, `mail/${STATE.user.uid}/trash/${id}`)); return toast("Mensagem excluída", "ok"); }
+      await set(ref(db, `mail/${STATE.user.uid}/trash/${id}`), { ...m, fromBox: bx });
+      await remove(ref(db, `mail/${STATE.user.uid}/${bx}/${id}`));
+      toast("Movida para a lixeira", "ok");
+    });
+  };
+  $("#mailQ").oninput = draw;
+  draw();
+}
+
+function mailUserOptions(selected = []) {
+  return list(STATE.users).filter(u => u.id !== STATE.user.uid)
+    .map(u => `<option value="${u.id}" ${selected.includes(u.id) ? "selected" : ""}>${esc(userName(u.id))} — ${esc(u.email)}${isOnline(u.id) ? " ● online" : ""}</option>`).join("");
+}
+function mailCompose(draft = {}) {
+  openModal(draft.id ? "Editar rascunho" : "Novo e-mail", `
+    <label class="field"><span>Destinatários (segure Ctrl para escolher vários) *</span>
+      <select id="ml_to" multiple size="6">${mailUserOptions(draft.to || [])}</select></label>
+    <label class="field" style="margin-top:10px"><span>Assunto</span><input id="ml_sub" value="${esc(draft.subject || "")}"></label>
+    <label class="field" style="margin-top:10px"><span>Mensagem</span><textarea id="ml_body" rows="8">${esc(draft.body || "")}</textarea></label>
+  `, `<button class="btn" id="mCancel">Cancelar</button>
+      <button class="btn" id="mlDraft">Salvar rascunho</button>
+      <button class="btn btn-primary" id="mlSend">Enviar</button>`);
+  $("#mCancel").onclick = closeModal;
+  const collect = () => {
+    const to = Array.from($("#ml_to").selectedOptions).map(o => o.value);
+    return {
+      to, toNames: to.map(userName).join(", "),
+      subject: $("#ml_sub").value.trim(), body: $("#ml_body").value,
+      from: STATE.user.uid, fromName: myName(), fromEmail: STATE.user.email, at: Date.now()
+    };
+  };
+  $("#mlDraft").onclick = async () => {
+    const m = collect();
+    if (draft.id) await set(ref(db, `mail/${STATE.user.uid}/drafts/${draft.id}`), m);
+    else await push(ref(db, `mail/${STATE.user.uid}/drafts`), m);
+    closeModal(); toast("Rascunho salvo", "ok");
+  };
+  $("#mlSend").onclick = async () => {
+    const m = collect();
+    if (!m.to.length) return toast("Escolha ao menos um destinatário", "err");
+    try {
+      for (const uid of m.to) await push(ref(db, `mail/${uid}/inbox`), { ...m, read: false });
+      await push(ref(db, `mail/${STATE.user.uid}/sent`), { ...m, read: true });
+      if (draft.id) await remove(ref(db, `mail/${STATE.user.uid}/drafts/${draft.id}`));
+      closeModal(); toast("E-mail enviado", "ok");
+    } catch (e) { toast("Falha ao enviar: " + (e?.message || e), "err"); }
+  };
+}
+async function mailOpen(box, id) {
+  const m = (MSG.mail[box] || {})[id]; if (!m) return;
+  if (box === "drafts") return mailCompose({ id, ...m });
+  if (box === "inbox" && !m.read) await update(ref(db, `mail/${STATE.user.uid}/inbox/${id}`), { read: true });
+  openModal(m.subject || "(sem assunto)", `
+    <div class="muted">De: <strong>${esc(m.fromName || "—")}</strong> ${esc(m.fromEmail || "")}<br>
+      Para: ${esc(m.toNames || "—")}<br>${fmtWhen(m.at)}</div>
+    <div class="card" style="margin-top:12px;background:var(--panel-2);white-space:pre-wrap">${esc(m.body || "")}</div>
+  `, `<button class="btn" id="mCancel">Fechar</button>
+      <button class="btn" id="mlChat">Abrir chat com o remetente</button>
+      <button class="btn btn-primary" id="mlReply">Responder</button>`);
+  $("#mCancel").onclick = closeModal;
+  $("#mlChat").onclick = () => { closeModal(); openDirectChat(m.from); };
+  $("#mlReply").onclick = () => mailCompose({
+    to: [m.from], subject: (m.subject || "").startsWith("Re:") ? m.subject : "Re: " + (m.subject || ""),
+    body: `\n\n--- Em ${fmtWhen(m.at)}, ${m.fromName} escreveu ---\n${m.body || ""}`
+  });
+}
+
+/* ================= CHAT ONLINE ================= */
+function myChats() {
+  const uid = STATE.user.uid;
+  return list(MSG.chats).filter(c => (c.members || {})[uid]).sort((a, b) => (b.lastAt || 0) - (a.lastAt || 0));
+}
+function chatTitle(c) {
+  if (c.type === "group") return c.name || "Grupo";
+  const other = Object.keys(c.members || {}).find(u => u !== STATE.user.uid);
+  return userName(other);
+}
+function chatView(el) {
+  const chats = myChats();
+  if (MSG.chatId && !chats.some(c => c.id === MSG.chatId)) MSG.chatId = null;
+  const online = list(STATE.users).filter(u => u.id !== STATE.user.uid && isOnline(u.id));
+  el.innerHTML = `
+  <div class="msg-layout">
+    <aside class="card msg-side">
+      <div class="toolbar" style="gap:6px">
+        <button class="btn btn-primary" id="chNewDirect" style="flex:1">+ Conversa</button>
+        <button class="btn" id="chNewGroup" style="flex:1">+ Grupo</button>
+      </div>
+      <div class="section-title">Conversas</div>
+      <div class="msg-folders">${chats.length ? chats.map(c => `
+        <button class="msg-folder ${c.id === MSG.chatId ? "active" : ""}" data-chat="${c.id}">
+          <span>${c.type === "group" ? "👥" : `<span class="dot ${isOnline(Object.keys(c.members).find(u => u !== STATE.user.uid)) ? "on" : ""}"></span>`}
+            ${esc(chatTitle(c))}</span>
+          <small class="muted">${fmtWhen(c.lastAt)}</small>
+        </button>`).join("") : `<div class="empty">Nenhuma conversa ainda.</div>`}</div>
+      <div class="section-title">Quem está online (${online.length})</div>
+      <div class="msg-folders">${online.length ? online.map(u => `
+        <button class="msg-folder" data-dm="${u.id}"><span><span class="dot on"></span>${esc(userName(u.id))}</span>
+        ${u.chatRole === "moderador" ? `<span class="pill">mod</span>` : ""}</button>`).join("")
+      : `<div class="empty">Ninguém online no momento.</div>`}</div>
+    </aside>
+    <section class="card msg-main" id="chatPane"></section>
+  </div>`;
+  $$("[data-chat]", el).forEach(b => b.onclick = () => { MSG.chatId = b.dataset.chat; openChat(MSG.chatId); });
+  $$("[data-dm]", el).forEach(b => b.onclick = () => openDirectChat(b.dataset.dm));
+  $("#chNewDirect").onclick = () => newDirectForm();
+  $("#chNewGroup").onclick = () => newGroupForm();
+  if (MSG.chatId) openChat(MSG.chatId); else $("#chatPane").innerHTML = `<div class="empty">Escolha uma conversa ou inicie uma nova.</div>`;
+}
+function newDirectForm() {
+  openModal("Nova conversa", `<label class="field"><span>Usuário</span>
+    <select id="nd_user">${mailUserOptions()}</select></label>`,
+    `<button class="btn" id="mCancel">Cancelar</button><button class="btn btn-primary" id="mSave">Abrir conversa</button>`);
+  $("#mCancel").onclick = closeModal;
+  $("#mSave").onclick = () => { const u = $("#nd_user").value; closeModal(); openDirectChat(u); };
+}
+async function openDirectChat(otherUid) {
+  if (!otherUid) return;
+  const uid = STATE.user.uid;
+  const found = list(MSG.chats).find(c => c.type === "direct" && (c.members || {})[uid] && (c.members || {})[otherUid]);
+  let id = found?.id;
+  if (!id) {
+    const r = await push(ref(db, "chats"), {
+      type: "direct", members: { [uid]: true, [otherUid]: true },
+      createdBy: uid, createdAt: Date.now(), lastAt: Date.now(), lastText: ""
+    });
+    id = r.key;
+  }
+  MSG.tab = "chat"; MSG.chatId = id;
+  if (STATE.view !== "mensagens") { STATE.view = "mensagens"; renderView(); } else renderMensagensBody();
+}
+function newGroupForm() {
+  openModal("Novo grupo", `
+    <label class="field"><span>Nome do grupo *</span><input id="ng_name" placeholder="Ex.: Equipe de vendas"></label>
+    <label class="field" style="margin-top:10px"><span>Participantes (Ctrl para vários)</span>
+      <select id="ng_users" multiple size="7">${mailUserOptions()}</select></label>
+  `, `<button class="btn" id="mCancel">Cancelar</button><button class="btn btn-primary" id="mSave">Criar grupo</button>`);
+  $("#mCancel").onclick = closeModal;
+  $("#mSave").onclick = async () => {
+    const name = $("#ng_name").value.trim();
+    if (!name) return toast("Informe o nome do grupo", "err");
+    const members = { [STATE.user.uid]: true };
+    Array.from($("#ng_users").selectedOptions).forEach(o => members[o.value] = true);
+    const r = await push(ref(db, "chats"), {
+      type: "group", name, members, createdBy: STATE.user.uid,
+      createdAt: Date.now(), lastAt: Date.now(), lastText: ""
+    });
+    MSG.chatId = r.key; closeModal(); toast("Grupo criado", "ok"); renderMensagensBody();
+  };
+}
+function openChat(chatId) {
+  const c = MSG.chats[chatId]; const pane = $("#chatPane");
+  if (!c || !pane) return;
+  const members = Object.keys(c.members || {});
+  pane.innerHTML = `
+    <div class="card-head">
+      <h3>${esc(chatTitle({ ...c, id: chatId }))}</h3>
+      <div style="flex:1"></div>
+      <div class="toolbar">
+        <span class="muted">${c.type === "group"
+      ? members.length + " participante(s) · " + members.filter(isOnline).length + " online"
+      : (isOnline(members.find(u => u !== STATE.user.uid)) ? "online agora" : "offline")}</span>
+        ${c.type === "group" ? `<button class="btn btn-sm" id="chMembers">Participantes</button>` : ""}
+        ${(c.createdBy === STATE.user.uid || isChatMod()) ? `<button class="btn btn-sm btn-danger" id="chDel">Excluir conversa</button>` : ""}
+      </div>
+    </div>
+    <div class="chat-box" id="chatBox"><div class="empty">Carregando mensagens...</div></div>
+    <form class="chat-send" id="chatForm">
+      <input id="chatInput" placeholder="${canChat() && !STATE.profile?.chatMuted ? "Escreva sua mensagem..." : "Você está sem permissão para enviar mensagens"}"
+        ${canChat() && !STATE.profile?.chatMuted ? "" : "disabled"} autocomplete="off">
+      <button class="btn btn-primary" type="submit" ${canChat() && !STATE.profile?.chatMuted ? "" : "disabled"}>Enviar</button>
+    </form>`;
+
+  if ($("#chMembers")) $("#chMembers").onclick = () => groupMembersForm(chatId);
+  if ($("#chDel")) $("#chDel").onclick = () => confirmDialog("Excluir a conversa e todas as mensagens?", async () => {
+    await remove(ref(db, "chatMessages/" + chatId));
+    await remove(ref(db, "chats/" + chatId));
+    MSG.chatId = null; toast("Conversa excluída", "ok"); renderMensagensBody();
+  });
+
+  if (MSG.msgUnsub) { try { MSG.msgUnsub(); } catch (e) {} }
+  MSG.msgUnsub = onValue(query(ref(db, "chatMessages/" + chatId), orderByChild("at"), limitToLast(300)), snap => {
+    MSG.msgs = snap.val() || {};
+    drawChatMessages(chatId);
+    update(ref(db, "users/" + STATE.user.uid + "/chatSeen"), { [chatId]: Date.now() }).catch(() => {});
+  }, err => { const b = $("#chatBox"); if (b) b.innerHTML = `<div class="empty">Sem permissão para ler as mensagens (${esc(err.message)}).</div>`; });
+
+  $("#chatForm").onsubmit = async ev => {
+    ev.preventDefault();
+    const input = $("#chatInput"); const text = input.value.trim();
+    if (!text) return;
+    input.value = "";
+    await push(ref(db, "chatMessages/" + chatId), {
+      uid: STATE.user.uid, name: myName(), text, at: Date.now()
+    });
+    await update(ref(db, "chats/" + chatId), { lastAt: Date.now(), lastText: text.slice(0, 60), lastBy: STATE.user.uid });
+  };
+}
+function drawChatMessages(chatId) {
+  const box = $("#chatBox"); if (!box) return;
+  const msgs = list(MSG.msgs).sort((a, b) => (a.at || 0) - (b.at || 0));
+  box.innerHTML = msgs.length ? msgs.map(m => {
+    const mine = m.uid === STATE.user.uid;
+    const canDel = !m.deleted && (mine || isChatMod());
+    return `<div class="chat-msg ${mine ? "mine" : ""}">
+      <div class="bubble">
+        ${mine ? "" : `<div class="chat-author">${esc(m.name || userName(m.uid))}${isOnline(m.uid) ? ` <span class="dot on"></span>` : ""}</div>`}
+        <div class="chat-text">${m.deleted ? `<em class="muted">mensagem removida${m.deletedBy ? " por " + esc(m.deletedBy) : ""}</em>` : esc(m.text || "")}</div>
+        <div class="chat-time muted">${fmtWhen(m.at)}${canDel ? ` · <button class="link-btn" data-msgdel="${m.id}">apagar</button>` : ""}</div>
+      </div></div>`;
+  }).join("") : `<div class="empty">Nenhuma mensagem ainda. Diga olá!</div>`;
+  box.scrollTop = box.scrollHeight;
+  $$("[data-msgdel]", box).forEach(b => b.onclick = async () => {
+    await update(ref(db, `chatMessages/${chatId}/${b.dataset.msgdel}`), {
+      deleted: true, text: "", deletedBy: myName()
+    });
+  });
+}
+function groupMembersForm(chatId) {
+  const c = MSG.chats[chatId] || {};
+  const members = Object.keys(c.members || {});
+  const canManage = c.createdBy === STATE.user.uid || isChatMod();
+  openModal("Participantes — " + (c.name || "Grupo"), `
+    <div class="msg-folders">${members.map(uid => `
+      <div class="msg-folder"><span><span class="dot ${isOnline(uid) ? "on" : ""}"></span>${esc(userName(uid))}
+        ${STATE.users[uid]?.chatRole === "moderador" ? `<span class="pill">mod</span>` : ""}</span>
+        ${canManage && uid !== c.createdBy ? `<button class="btn btn-sm btn-danger" data-rmv="${uid}">Remover</button>` : ""}</div>`).join("")}</div>
+    ${canManage ? `<label class="field" style="margin-top:12px"><span>Adicionar participantes</span>
+      <select id="gm_add" multiple size="5">${list(STATE.users).filter(u => !members.includes(u.id))
+        .map(u => `<option value="${u.id}">${esc(userName(u.id))}</option>`).join("")}</select></label>` : ""}
+  `, `<button class="btn" id="mCancel">Fechar</button>${canManage ? `<button class="btn btn-primary" id="mSave">Adicionar</button>` : ""}`);
+  $("#mCancel").onclick = closeModal;
+  $$("[data-rmv]").forEach(b => b.onclick = async () => {
+    await remove(ref(db, `chats/${chatId}/members/${b.dataset.rmv}`));
+    toast("Participante removido", "ok"); closeModal(); renderMensagensBody();
+  });
+  if ($("#mSave")) $("#mSave").onclick = async () => {
+    const add = {};
+    Array.from($("#gm_add").selectedOptions).forEach(o => add[o.value] = true);
+    if (!Object.keys(add).length) return closeModal();
+    await update(ref(db, `chats/${chatId}/members`), add);
+    closeModal(); toast("Participantes adicionados", "ok"); renderMensagensBody();
+  };
+}
+
+/* ================= MODERAÇÃO / GESTÃO DE USUÁRIOS DO CHAT ================= */
+function chatAdminView(el) {
+  const users = list(STATE.users);
+  el.innerHTML = `
+  <div class="card">
+    <div class="card-head"><h3>Usuários do chat e moderação</h3><div style="flex:1"></div>
+      <span class="muted">${users.filter(u => isOnline(u.id)).length} online de ${users.length}</span></div>
+    <p class="muted">O administrador pode conceder o cargo de <strong>moderador de chat</strong> (pode apagar mensagens de qualquer usuário e gerenciar grupos),
+      silenciar ou bloquear o acesso de um usuário ao chat.</p>
+    <div style="margin-top:12px">${users.length ? tbl(["Usuário", "E-mail", "Situação", "Cargo no chat", "Ações"],
+      users.map(u => `<tr>
+        <td><span class="dot ${isOnline(u.id) ? "on" : ""}"></span> ${esc(userName(u.id))}</td>
+        <td>${esc(u.email || "—")}</td>
+        <td>${isOnline(u.id) ? `<span class="pill ok">online</span>`
+          : `<span class="pill">offline${MSG.presence[u.id]?.lastSeen ? " · " + fmtWhen(MSG.presence[u.id].lastSeen) : ""}</span>`}
+          ${u.chatMuted ? ` <span class="pill warn">silenciado</span>` : ""}${u.chatBanned ? ` <span class="pill dan">bloqueado</span>` : ""}</td>
+        <td>${u.email === ADMIN_EMAIL ? `<span class="pill ok">admin geral</span>`
+          : `<span class="pill ${u.chatRole === "moderador" ? "ok" : ""}">${esc(u.chatRole || "membro")}</span>`}</td>
+        <td>${u.id === STATE.user.uid || u.email === ADMIN_EMAIL ? `<span class="muted">—</span>` : `
+          ${STATE.isAdmin ? `<button class="btn btn-sm" data-role="${u.id}">${u.chatRole === "moderador" ? "Remover moderação" : "Tornar moderador"}</button>` : ""}
+          <button class="btn btn-sm" data-mute="${u.id}">${u.chatMuted ? "Reativar fala" : "Silenciar"}</button>
+          ${STATE.isAdmin ? `<button class="btn btn-sm btn-danger" data-ban="${u.id}">${u.chatBanned ? "Desbloquear" : "Bloquear chat"}</button>` : ""}
+          <button class="btn btn-sm btn-ok" data-open="${u.id}">Conversar</button>`}</td></tr>`).join(""))
+      : `<div class="empty">Nenhum usuário cadastrado.</div>`}</div>
+  </div>`;
+  $$("[data-role]", el).forEach(b => b.onclick = async () => {
+    const u = STATE.users[b.dataset.role] || {};
+    await update(ref(db, "users/" + b.dataset.role), { chatRole: u.chatRole === "moderador" ? "membro" : "moderador" });
+    toast("Cargo de chat atualizado", "ok");
+  });
+  $$("[data-mute]", el).forEach(b => b.onclick = async () => {
+    const u = STATE.users[b.dataset.mute] || {};
+    await update(ref(db, "users/" + b.dataset.mute), { chatMuted: !u.chatMuted });
+    toast(!u.chatMuted ? "Usuário silenciado no chat" : "Usuário reativado", "ok");
+  });
+  $$("[data-ban]", el).forEach(b => b.onclick = async () => {
+    const u = STATE.users[b.dataset.ban] || {};
+    await update(ref(db, "users/" + b.dataset.ban), { chatBanned: !u.chatBanned });
+    toast(!u.chatBanned ? "Acesso ao chat bloqueado" : "Acesso ao chat liberado", "ok");
+  });
+  $$("[data-open]", el).forEach(b => b.onclick = () => openDirectChat(b.dataset.open));
 }
