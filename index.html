@@ -211,10 +211,17 @@
             </div>
 
             <div id="aba-email-entrada" class="pane-email active">
+                <div class="barra-gerenciar-mensagens">
+                    <button type="button" class="btn-mini-msg" onclick="marcarTodasComoLidas()">✅ Marcar todas como lidas</button>
+                    <button type="button" class="btn-mini-msg perigo" onclick="limparPastaMensagens('entrada')">🗑️ Limpar entrada</button>
+                </div>
                 <div id="lista-email-entrada" class="lista-emails"></div>
             </div>
 
             <div id="aba-email-enviados" class="pane-email">
+                <div class="barra-gerenciar-mensagens">
+                    <button type="button" class="btn-mini-msg perigo" onclick="limparPastaMensagens('enviado')">🗑️ Limpar enviados</button>
+                </div>
                 <div id="lista-email-enviados" class="lista-emails"></div>
             </div>
 
@@ -235,7 +242,24 @@
                 <h4 id="leitor-email-assunto"></h4>
                 <p id="leitor-email-meta" class="meta-email"></p>
                 <div id="leitor-email-corpo" class="corpo-email"></div>
-                <button type="button" id="btn-responder-email" class="btn-gamer" style="margin-top:12px;">↩️ Responder</button>
+
+                <form id="form-editar-mensagem" class="form-editar-mensagem" style="display:none;">
+                    <label class="rotulo-form">Assunto</label>
+                    <input type="text" id="editar-msg-assunto" maxlength="120" required>
+                    <label class="rotulo-form">Mensagem</label>
+                    <textarea id="editar-msg-corpo" rows="6" maxlength="2000" required></textarea>
+                    <div class="barra-acoes-mensagem">
+                        <button type="submit" class="btn-gamer">💾 Salvar alterações</button>
+                        <button type="button" id="btn-cancelar-edicao-msg" class="btn-mini-msg">Cancelar</button>
+                    </div>
+                </form>
+
+                <div class="barra-acoes-mensagem">
+                    <button type="button" id="btn-responder-email" class="btn-gamer">↩️ Responder</button>
+                    <button type="button" id="btn-editar-email" class="btn-mini-msg">✏️ Editar</button>
+                    <button type="button" id="btn-marcar-nao-lido-email" class="btn-mini-msg">📩 Marcar como não lida</button>
+                    <button type="button" id="btn-excluir-email" class="btn-mini-msg perigo">🗑️ Excluir</button>
+                </div>
             </div>
         </div>
     </div>
@@ -247,7 +271,7 @@
                 <h3>💡 Enviar Sugestão ao Admin</h3>
                 <button type="button" id="btn-fechar-sugestao" class="btn-fechar">&times;</button>
             </div>
-            <form id="form-sugestao" style="margin-top:15px;">
+            <form id="form-sugestao">
                 <p class="instrucao">Sua sugestão chega ao administrador junto com todos os seus dados cadastrais para retorno.</p>
                 <label class="rotulo-form">Assunto</label>
                 <input type="text" id="sugestao-assunto" maxlength="120" placeholder="Ex: Melhoria na vitrine" required>

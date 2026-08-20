@@ -1694,6 +1694,7 @@ async function enviarMensagemInterna(uidDestino, emailDestino, assunto, corpo) {
         para_email: emailDestino,
         assunto: assunto,
         corpo: corpo,
+        grupo: `${remetenteUid}_${Date.now()}`,
         timestamp: Date.now()
     };
 
@@ -1732,9 +1733,18 @@ function renderizarListasEmail() {
             const m = cacheMensagensUsuario[id];
             const pessoa = pasta === "entrada" ? m.de_nome || m.de_email : (m.para_email || "destinatário");
             return `
-                <div class="item-email ${(!m.lido && pasta === 'entrada') ? 'nao-lido' : ''}" onclick="abrirMensagemInterna('${id}')">
-                    <h5>${escapar(m.assunto || '(sem assunto)')}</h5>
-                    <p class="meta-email">${pasta === 'entrada' ? 'De' : 'Para'}: ${escapar(pessoa)} · ${formatarData(m.timestamp)}</p>
+                <div class="item-email ${(!m.lido && pasta === 'entrada') ? 'nao-lido' : ''}">
+                    <div onclick="abrirMensagemInterna('${id}')">
+                        <h5>${escapar(m.assunto || '(sem assunto)')} ${m.editado ? '<span class="tag-editada">(editada)</span>' : ''}</h5>
+                        <p class="meta-email">${pasta === 'entrada' ? 'De' : 'Para'}: ${escapar(pessoa)} · ${formatarData(m.timestamp)}</p>
+                    </div>
+                    <div class="acoes-item-email">
+                        <button type="button" class="btn-mini-msg" onclick="abrirMensagemInterna('${id}')">👁️ Abrir</button>
+                        ${pasta === 'entrada'
+                            ? `<button type="button" class="btn-mini-msg" onclick="alternarLidoMensagem('${id}')">${m.lido ? '📩 Marcar não lida' : '✅ Marcar lida'}</button>`
+                            : `<button type="button" class="btn-mini-msg" onclick="abrirEdicaoMensagem('${id}')">✏️ Editar</button>`}
+                        <button type="button" class="btn-mini-msg perigo" onclick="excluirMensagemUsuario('${id}')">🗑️ Excluir</button>
+                    </div>
                 </div>`;
         }).join("");
     };
@@ -1767,9 +1777,138 @@ function abrirMensagemInterna(id) {
         `${m.pasta === 'entrada' ? 'De' : 'Para'}: ${m.pasta === 'entrada' ? (m.de_nome || m.de_email) : m.para_email} · ${formatarData(m.timestamp)}`;
     document.getElementById('leitor-email-corpo').innerText = m.corpo || "";
 
+    const formEditar = document.getElementById('form-editar-mensagem');
+    if (formEditar) formEditar.style.display = "none";
+    const btnEditar = document.getElementById('btn-editar-email');
+    if (btnEditar) btnEditar.style.display = (m.pasta === 'enviado') ? "inline-block" : "none";
+    const btnNaoLido = document.getElementById('btn-marcar-nao-lido-email');
+    if (btnNaoLido) btnNaoLido.style.display = (m.pasta === 'entrada') ? "inline-block" : "none";
+
     if (m.pasta === "entrada" && !m.lido && usuarioLogadoUid) {
         database.ref(`mensagens/${usuarioLogadoUid}/${id}/lido`).set(true);
     }
+}
+
+// ==========================================================================
+// GERENCIAMENTO DAS MENSAGENS DO PRÓPRIO USUÁRIO
+// ==========================================================================
+function caminhoMinhaMensagem(id) {
+    return `mensagens/${usuarioLogadoUid}/${id}`;
+}
+
+async function excluirMensagemUsuario(id) {
+    if (!usuarioLogadoUid || !cacheMensagensUsuario[id]) return;
+    if (!confirm("Excluir esta mensagem da sua caixa? Esta ação não pode ser desfeita.")) return;
+    try {
+        await database.ref(caminhoMinhaMensagem(id)).remove();
+        if (mensagemAbertaId === id) {
+            mensagemAbertaId = null;
+            trocarAbaEmail('entrada');
+        }
+        renderizarListasEmail();
+    } catch (erro) { alert("Erro ao excluir mensagem: " + erro.message); }
+}
+
+async function alternarLidoMensagem(id) {
+    const m = cacheMensagensUsuario[id];
+    if (!usuarioLogadoUid || !m) return;
+    try {
+        await database.ref(`${caminhoMinhaMensagem(id)}/lido`).set(!m.lido);
+        renderizarListasEmail();
+    } catch (erro) { alert("Erro ao atualizar mensagem: " + erro.message); }
+}
+
+async function marcarTodasComoLidas() {
+    if (!usuarioLogadoUid) return;
+    const atualizacoes = {};
+    Object.keys(cacheMensagensUsuario).forEach(id => {
+        const m = cacheMensagensUsuario[id];
+        if (m.pasta === 'entrada' && !m.lido) atualizacoes[`${id}/lido`] = true;
+    });
+    if (!Object.keys(atualizacoes).length) return alert("Nenhuma mensagem não lida.");
+    try {
+        await database.ref(`mensagens/${usuarioLogadoUid}`).update(atualizacoes);
+        renderizarListasEmail();
+    } catch (erro) { alert("Erro: " + erro.message); }
+}
+
+async function limparPastaMensagens(pasta) {
+    if (!usuarioLogadoUid) return;
+    const ids = Object.keys(cacheMensagensUsuario).filter(id => cacheMensagensUsuario[id].pasta === pasta);
+    if (!ids.length) return alert("Nenhuma mensagem nesta pasta.");
+    if (!confirm(`Excluir ${ids.length} mensagem(ns) da pasta ${pasta === 'entrada' ? 'Entrada' : 'Enviados'}?`)) return;
+    const atualizacoes = {};
+    ids.forEach(id => { atualizacoes[id] = null; });
+    try {
+        await database.ref(`mensagens/${usuarioLogadoUid}`).update(atualizacoes);
+        mensagemAbertaId = null;
+        trocarAbaEmail(pasta === 'entrada' ? 'entrada' : 'enviados');
+        renderizarListasEmail();
+    } catch (erro) { alert("Erro ao limpar pasta: " + erro.message); }
+}
+
+function abrirEdicaoMensagem(id) {
+    const m = cacheMensagensUsuario[id];
+    if (!m) return;
+    if (m.pasta !== 'enviado') return alert("Você só pode editar mensagens que enviou.");
+    abrirMensagemInterna(id);
+    const form = document.getElementById('form-editar-mensagem');
+    if (!form) return;
+    document.getElementById('editar-msg-assunto').value = m.assunto || "";
+    document.getElementById('editar-msg-corpo').value = m.corpo || "";
+    form.style.display = "block";
+    document.getElementById('editar-msg-assunto').focus();
+}
+
+const btnEditarEmail = document.getElementById('btn-editar-email');
+if (btnEditarEmail) btnEditarEmail.addEventListener('click', () => { if (mensagemAbertaId) abrirEdicaoMensagem(mensagemAbertaId); });
+
+const btnExcluirEmail = document.getElementById('btn-excluir-email');
+if (btnExcluirEmail) btnExcluirEmail.addEventListener('click', () => { if (mensagemAbertaId) excluirMensagemUsuario(mensagemAbertaId); });
+
+const btnMarcarNaoLido = document.getElementById('btn-marcar-nao-lido-email');
+if (btnMarcarNaoLido) {
+    btnMarcarNaoLido.addEventListener('click', async () => {
+        if (!mensagemAbertaId || !usuarioLogadoUid) return;
+        try {
+            await database.ref(`${caminhoMinhaMensagem(mensagemAbertaId)}/lido`).set(false);
+            mensagemAbertaId = null;
+            trocarAbaEmail('entrada');
+            renderizarListasEmail();
+        } catch (erro) { alert("Erro: " + erro.message); }
+    });
+}
+
+const btnCancelarEdicaoMsg = document.getElementById('btn-cancelar-edicao-msg');
+if (btnCancelarEdicaoMsg) {
+    btnCancelarEdicaoMsg.addEventListener('click', () => {
+        document.getElementById('form-editar-mensagem').style.display = "none";
+    });
+}
+
+const formEditarMensagem = document.getElementById('form-editar-mensagem');
+if (formEditarMensagem) {
+    formEditarMensagem.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        if (!mensagemAbertaId || !usuarioLogadoUid) return;
+        const assunto = document.getElementById('editar-msg-assunto').value.trim();
+        const corpo = document.getElementById('editar-msg-corpo').value.trim();
+        if (!assunto || !corpo) return alert("Preencha assunto e mensagem.");
+        try {
+            await database.ref(caminhoMinhaMensagem(mensagemAbertaId)).update({
+                assunto: assunto,
+                corpo: corpo,
+                editado: true,
+                editado_em: Date.now()
+            });
+            const idAtual = mensagemAbertaId;
+            cacheMensagensUsuario[idAtual] = { ...cacheMensagensUsuario[idAtual], assunto, corpo, editado: true };
+            formEditarMensagem.style.display = "none";
+            abrirMensagemInterna(idAtual);
+            renderizarListasEmail();
+            alert("✅ Mensagem atualizada na sua cópia.");
+        } catch (erro) { alert("Erro ao editar mensagem: " + erro.message); }
+    });
 }
 
 const btnVoltarListaEmail = document.getElementById('btn-voltar-lista-email');

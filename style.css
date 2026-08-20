@@ -1028,12 +1028,51 @@ body {
 .leitor-email h4 { color: #00ff66; margin: 10px 0 4px; }
 .vazio-lista { color: #8899a6; font-size: 0.85rem; text-align: center; padding: 20px; }
 
-#modal-painel-admin select, #modal-email-interno select,
-#modal-painel-admin textarea, #modal-email-interno textarea,
-#modal-painel-admin input, #modal-email-interno input {
+#modal-painel-admin select, #modal-email-interno select, #modal-sugestao select,
+#modal-painel-admin textarea, #modal-email-interno textarea, #modal-sugestao textarea,
+#modal-painel-admin input, #modal-email-interno input, #modal-sugestao input {
     width: 100%; background: #0b0e14; border: 1px solid #242f41; color: #fff;
     border-radius: 4px; padding: 10px; font-size: 0.9rem; margin-bottom: 10px;
+    font-family: inherit;
 }
+
+#modal-painel-admin select:focus, #modal-email-interno select:focus, #modal-sugestao select:focus,
+#modal-painel-admin textarea:focus, #modal-email-interno textarea:focus, #modal-sugestao textarea:focus,
+#modal-painel-admin input:focus, #modal-email-interno input:focus, #modal-sugestao input:focus {
+    outline: none; border-color: #00ff66;
+}
+
+#modal-painel-admin textarea, #modal-email-interno textarea, #modal-sugestao textarea {
+    resize: vertical; min-height: 110px; line-height: 1.5;
+}
+
+#modal-painel-admin ::placeholder, #modal-email-interno ::placeholder, #modal-sugestao ::placeholder {
+    color: #61707e;
+}
+
+/* Modal de sugestão */
+#modal-sugestao .modal-form-content { padding: 25px; }
+#form-sugestao { display: flex; flex-direction: column; margin-top: 5px; }
+#form-sugestao .instrucao { margin-bottom: 12px; }
+#form-sugestao .btn-gamer { margin-top: 12px; }
+
+/* Gerenciamento de mensagens do usuário */
+.barra-gerenciar-mensagens {
+    display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px;
+}
+.btn-mini-msg {
+    background: #0b0e14; border: 1px solid #2a394f; color: #cfd9e4;
+    border-radius: 4px; padding: 7px 10px; font-size: 0.75rem; font-weight: bold;
+    cursor: pointer; transition: all 0.2s;
+}
+.btn-mini-msg:hover { border-color: #00ff66; color: #00ff66; }
+.btn-mini-msg.perigo { color: #ff6666; border-color: #442020; }
+.btn-mini-msg.perigo:hover { border-color: #ff3333; color: #ff3333; }
+.acoes-item-email { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.barra-acoes-mensagem { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px; }
+.barra-acoes-mensagem .btn-gamer { width: auto; padding: 10px 16px; }
+.form-editar-mensagem { margin-top: 14px; border-top: 1px solid #1f2a3c; padding-top: 12px; }
+.tag-editada { color: #ffcc44; font-size: 0.7rem; font-weight: bold; }
 
 @media (max-width: 600px) {
     .app-header { flex-direction: column; align-items: flex-start; gap: 10px; }
