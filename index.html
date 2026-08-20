@@ -38,8 +38,13 @@
                 <input type="tel" id="cad-whatsapp" placeholder="WhatsApp com DDD (Apenas números)" maxlength="15" required>
                 <input type="email" id="cad-email" placeholder="E-mail Válido" required>
                 <input type="password" id="cad-senha" placeholder="Senha (Mín. 6 dígitos)" required>
-                <button type="submit" class="btn-gamer">CADASTRAR E ENTRAR</button>
+                <button type="submit" id="btn-cadastrar" class="btn-gamer">CADASTRAR E ENTRAR</button>
             </form>
+
+            <div id="overlay-auth-carregando" class="overlay-carregando">
+                <div class="aro-carregando"></div>
+                <span id="texto-auth-carregando">CONECTANDO...</span>
+            </div>
         </div>
     </div>
 

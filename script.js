@@ -193,7 +193,11 @@ function restaurarTelaLoginDoZero() {
     if (emailLogin) emailLogin.value = "";
 
     const btnLogar = document.getElementById('btn-logar');
-    if (btnLogar) { btnLogar.innerText = "LOGAR NO HUB"; btnLogar.disabled = false; }
+    if (btnLogar) { btnLogar.classList.remove('carregando'); btnLogar.innerText = "LOGAR NO HUB"; btnLogar.disabled = false; }
+    const btnCadastrarReset = document.getElementById('btn-cadastrar');
+    if (btnCadastrarReset) { btnCadastrarReset.classList.remove('carregando'); btnCadastrarReset.innerText = "CADASTRAR E ENTRAR"; btnCadastrarReset.disabled = false; }
+    const overlayAuth = document.getElementById('overlay-auth-carregando');
+    if (overlayAuth) overlayAuth.classList.remove('active');
 
     // Volta para a aba "Entrar"
     if (tabLogin && tabCadastro) {
@@ -676,37 +680,109 @@ function inicializarBotaoWhatsApp() {
 function tornarOrdenavel(container, seletorItem) {
     if (!container || container.dataset.ordenavel === "1") return;
     container.dataset.ordenavel = "1";
+    container.dataset.seletorItem = seletorItem;
 
     container.addEventListener('pointerdown', (evento) => {
         const punho = evento.target.closest('.punho-arrasto');
         if (!punho || !container.contains(punho)) return;
+        // Garante que o punho pertence a ESTE container (evita conflito entre
+        // a lista de categorias e as listas de links dentro de cada categoria)
+        if (punho.closest('[data-ordenavel="1"]') !== container) return;
+
         const item = punho.closest(seletorItem);
-        if (!item) return;
+        if (!item || item.parentElement !== container) return;
 
         evento.preventDefault();
-        punho.setPointerCapture(evento.pointerId);
+        evento.stopPropagation();
+        try { punho.setPointerCapture(evento.pointerId); } catch (e) { /* ignora */ }
         item.classList.add('arrastando');
 
         const mover = (ev) => {
-            const alvo = document.elementFromPoint(ev.clientX, ev.clientY);
-            if (!alvo) return;
-            const itemAlvo = alvo.closest(seletorItem);
-            if (!itemAlvo || itemAlvo === item || itemAlvo.parentElement !== item.parentElement) return;
-            const retangulo = itemAlvo.getBoundingClientRect();
-            const depois = ev.clientY > retangulo.top + retangulo.height / 2;
-            itemAlvo.parentElement.insertBefore(item, depois ? itemAlvo.nextSibling : itemAlvo);
+            const irmaos = Array.from(container.children).filter(el => el.matches(seletorItem) && el !== item);
+            let referencia = null;
+            for (const irmao of irmaos) {
+                const r = irmao.getBoundingClientRect();
+                if (ev.clientY < r.top + r.height / 2) { referencia = irmao; break; }
+            }
+            if (referencia) {
+                if (referencia !== item.nextElementSibling) container.insertBefore(item, referencia);
+            } else if (container.lastElementChild !== item) {
+                container.appendChild(item);
+            }
         };
+
         const soltar = () => {
             item.classList.remove('arrastando');
-            punho.releasePointerCapture(evento.pointerId);
+            try { punho.releasePointerCapture(evento.pointerId); } catch (e) { /* ignora */ }
             punho.removeEventListener('pointermove', mover);
+            document.removeEventListener('pointermove', mover);
             punho.removeEventListener('pointerup', soltar);
             punho.removeEventListener('pointercancel', soltar);
+            document.removeEventListener('pointerup', soltar);
+            document.removeEventListener('pointercancel', soltar);
+            renumerarOrdem(container);
         };
+
         punho.addEventListener('pointermove', mover);
+        document.addEventListener('pointermove', mover);
         punho.addEventListener('pointerup', soltar);
         punho.addEventListener('pointercancel', soltar);
+        // Segurança: se o ponteiro for solto fora do punho, finaliza mesmo assim
+        document.addEventListener('pointerup', soltar);
+        document.addEventListener('pointercancel', soltar);
     });
+
+    // Ordenação por número digitado
+    container.addEventListener('input', (ev) => {
+        const campo = ev.target.closest('.input-ordem');
+        if (!campo || campo.closest('[data-ordenavel="1"]') !== container) return;
+        clearTimeout(campo.__timerOrdem);
+        campo.__timerOrdem = setTimeout(() => aplicarOrdemDigitada(container, campo), 350);
+    });
+    container.addEventListener('change', (ev) => {
+        const campo = ev.target.closest('.input-ordem');
+        if (!campo || campo.closest('[data-ordenavel="1"]') !== container) return;
+        clearTimeout(campo.__timerOrdem);
+        aplicarOrdemDigitada(container, campo);
+    });
+}
+
+// Reescreve os números 1..N na ordem visual atual
+function renumerarOrdem(container) {
+    if (!container) return;
+    const seletorItem = container.dataset.seletorItem;
+    if (!seletorItem) return;
+    Array.from(container.children)
+        .filter(el => el.matches(seletorItem))
+        .forEach((el, indice) => {
+            const campo = el.querySelector(':scope .input-ordem');
+            if (campo) campo.value = indice + 1;
+        });
+}
+
+// Move o item para a posição digitada pelo usuário
+function aplicarOrdemDigitada(container, campo) {
+    const seletorItem = container.dataset.seletorItem;
+    if (!seletorItem) return;
+    const item = campo.closest(seletorItem);
+    if (!item || item.parentElement !== container) return;
+
+    const itens = Array.from(container.children).filter(el => el.matches(seletorItem));
+    const total = itens.length;
+    let destino = parseInt(campo.value, 10);
+    if (isNaN(destino)) return;
+    if (destino < 1) destino = 1;
+    if (destino > total) destino = total;
+
+    const restantes = itens.filter(el => el !== item);
+    const referencia = restantes[destino - 1] || null;
+    if (referencia) container.insertBefore(item, referencia);
+    else container.appendChild(item);
+
+    const foco = document.activeElement === campo;
+    renumerarOrdem(container);
+    if (foco) { campo.value = destino; campo.focus(); campo.select(); }
+    item.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 
 // ==========================================================================
@@ -743,6 +819,7 @@ function adicionarBlocoCategoriaVisual(nomeCategoria = "", subcategoriasArr = []
     divBloco.innerHTML = `
         <div style="display: flex; gap: 8px; margin-bottom: 5px; align-items:center;">
             <span class="punho-arrasto" title="Arraste para reordenar">⠿</span>
+            <input type="number" min="1" class="input-ordem" title="Digite a posição do menu" placeholder="Nº">
             <input type="text" class="input-nome-categoria" placeholder="Título da Categoria" value="${escapar(nomeCategoria)}" style="margin-bottom:0; font-weight:bold; border-color:#00ff66;">
             <button type="button" onclick="removerBlocoCategoriaVisual('${blocoId}')" class="btn-sair" style="margin-top:0; padding:6px 12px; height:38px;">Deletar</button>
         </div>
@@ -760,6 +837,7 @@ function adicionarBlocoCategoriaVisual(nomeCategoria = "", subcategoriasArr = []
         </div>
     `;
     containerVisual.appendChild(divBloco);
+    renumerarOrdem(containerVisual);
 
     const rows = divBloco.querySelector('.container-subcategorias-rows');
     tornarOrdenavel(rows, '.linha-subcategoria-visual');
@@ -797,12 +875,14 @@ function adicionarLinhaSubcategoriaVisual(blocoId, txtLink = "", urlLink = "", n
     divRow.id = rowId;
     divRow.innerHTML = `
         <span class="punho-arrasto" title="Arraste para reordenar">⠿</span>
+        <input type="number" min="1" class="input-ordem" title="Digite a posição do link" placeholder="Nº">
         <input type="text" class="sub-txt" placeholder="Texto" value="${escapar(txtLink)}" style="flex: 1;">
         <input type="url" class="sub-url" placeholder="URL" value="${escapar(urlLink)}" style="flex: 1.5;">
         <label class="opcao-inline" style="margin:0;"><input type="checkbox" class="check-nova-aba-sub" ${novaAba ? "checked" : ""}> nova aba</label>
-        <button type="button" onclick="document.getElementById('${rowId}').remove()" class="btn-sair" style="background:#421414; color:#ff3333; margin-top:0; border:1px solid #ff3333; height:38px; padding:0 10px;">Excluir</button>
+        <button type="button" onclick="removerLinhaSubcategoriaVisual('${rowId}')" class="btn-sair" style="background:#421414; color:#ff3333; margin-top:0; border:1px solid #ff3333; height:38px; padding:0 10px;">Excluir</button>
     `;
     containerRows.appendChild(divRow);
+    renumerarOrdem(containerRows);
 }
 
 const btnSalvarVisualMenu = document.getElementById('btn-salvar-visual-menu');
@@ -849,10 +929,20 @@ if (btnSalvarVisualMenu) {
     });
 }
 
+function removerLinhaSubcategoriaVisual(rowId) {
+    const linha = document.getElementById(rowId);
+    if (!linha) return;
+    const pai = linha.parentElement;
+    linha.remove();
+    renumerarOrdem(pai);
+}
+
 function removerBlocoCategoriaVisual(blocoId) {
     if (confirm("⚠️ Deseja deletar toda essa categoria?")) {
         const elem = document.getElementById(blocoId);
+        const pai = elem ? elem.parentElement : null;
         if (elem) elem.remove();
+        renumerarOrdem(pai);
     }
 }
 
@@ -1800,6 +1890,30 @@ function verificarArquivo(arquivo) {
     leitor.readAsDataURL(arquivo);
 }
 
+
+// ==========================================================================
+// ANIMAÇÃO DE CARREGAMENTO (LOGIN / CADASTRO)
+// ==========================================================================
+function definirCarregandoBotao(botao, ativo) {
+    if (!botao) return;
+    if (ativo) {
+        if (!botao.dataset.textoOriginal) botao.dataset.textoOriginal = botao.innerText;
+        botao.classList.add('carregando');
+        botao.disabled = true;
+    } else {
+        botao.classList.remove('carregando');
+        botao.disabled = false;
+        if (botao.dataset.textoOriginal) botao.innerText = botao.dataset.textoOriginal;
+    }
+}
+
+function definirCarregandoAuth(ativo, mensagem) {
+    const overlay = document.getElementById('overlay-auth-carregando');
+    const texto = document.getElementById('texto-auth-carregando');
+    if (texto && mensagem) texto.innerText = mensagem;
+    if (overlay) overlay.classList.toggle('active', !!ativo);
+}
+
 const formLoginElement = document.getElementById('form-login');
 if (formLoginElement) {
     formLoginElement.addEventListener('submit', async function (e) {
@@ -1808,13 +1922,15 @@ if (formLoginElement) {
         const senha = document.getElementById('login-senha').value;
         const btnLogar = document.getElementById('btn-logar');
         if (!email || !senha) { alert("Preencha todos os campos."); return; }
-        if (btnLogar) { btnLogar.innerText = "Logando..."; btnLogar.disabled = true; }
+        definirCarregandoBotao(btnLogar, true);
+        definirCarregandoAuth(true, "CONECTANDO...");
         try {
             await auth.signInWithEmailAndPassword(email, senha);
         } catch (erro) {
             alert("Erro ao autenticar: " + erro.message);
         } finally {
-            if (btnLogar) { btnLogar.innerText = "LOGAR NO HUB"; btnLogar.disabled = false; }
+            definirCarregandoBotao(btnLogar, false);
+            definirCarregandoAuth(false);
         }
     });
 }
@@ -1868,8 +1984,8 @@ if (formCadastroAuth) {
         if (!validarProvedorEmail(email)) { alert("⚠️ Por favor, utilize um provedor de e-mail válido (Ex: Gmail, Hotmail, Outlook, Yahoo)."); return; }
         if (senha.length < 6) { alert("⚠️ A senha deve conter no mínimo 6 dígitos."); return; }
 
-        let textoBotaoOriginal = "";
-        if (btnCadastrar) { textoBotaoOriginal = btnCadastrar.innerText; btnCadastrar.innerText = "Criando conta..."; btnCadastrar.disabled = true; }
+        definirCarregandoBotao(btnCadastrar, true);
+        definirCarregandoAuth(true, "CRIANDO SUA CONTA...");
 
         try {
             const credencial = await auth.createUserWithEmailAndPassword(email, senha);
@@ -1887,7 +2003,8 @@ if (formCadastroAuth) {
         } catch (erro) {
             alert("Erro ao criar conta: " + erro.message);
         } finally {
-            if (btnCadastrar) { btnCadastrar.innerText = textoBotaoOriginal || "CADASTRAR E ENTRAR"; btnCadastrar.disabled = false; }
+            definirCarregandoBotao(btnCadastrar, false);
+            definirCarregandoAuth(false);
         }
     });
 }

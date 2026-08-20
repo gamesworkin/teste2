@@ -1041,3 +1041,122 @@ body {
     .kpi-card strong { font-size: 1.25rem; }
     .fab-sugestao { bottom: 88px; width: 50px; height: 50px; font-size: 1.25rem; }
 }
+
+/* ==========================================================================
+   ROLAGEM INVISÍVEL GLOBAL (funciona, mas sem barra visível)
+   ========================================================================== */
+* {
+    scrollbar-width: none;          /* Firefox */
+    -ms-overflow-style: none;       /* IE / Edge legado */
+}
+*::-webkit-scrollbar {              /* Chrome / Safari / Edge */
+    width: 0 !important;
+    height: 0 !important;
+    background: transparent;
+}
+
+/* Todos os modais rolam internamente quando o conteúdo é maior que a tela */
+.modal-form {
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+}
+.modal-form-content {
+    max-height: 92vh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+}
+.modal-admin-full { max-height: 92vh; overflow-y: auto; }
+.modal-jogos { overflow-y: auto; -webkit-overflow-scrolling: touch; }
+.modal-jogos .modal-content {
+    max-height: 92vh;
+    overflow-y: auto !important;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+}
+#modal-details-container-gamer { overflow-y: auto; }
+.lista-emails, .tabs-scroll, .tabela-relatorio { -webkit-overflow-scrolling: touch; }
+
+/* ==========================================================================
+   ANIMAÇÃO DE CARREGAMENTO (LOGIN / CADASTRO E DEMAIS BOTÕES)
+   ========================================================================== */
+@keyframes girar-spinner { to { transform: rotate(360deg); } }
+
+.btn-gamer.carregando,
+.btn-gamer:disabled {
+    cursor: not-allowed;
+    opacity: 0.85;
+}
+
+.btn-gamer.carregando {
+    position: relative;
+    color: transparent !important;
+    pointer-events: none;
+}
+
+.btn-gamer.carregando::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 20px;
+    height: 20px;
+    margin: -10px 0 0 -10px;
+    border: 2px solid rgba(2, 6, 13, 0.35);
+    border-top-color: #02060d;
+    border-radius: 50%;
+    animation: girar-spinner 0.7s linear infinite;
+}
+
+/* Sobreposição de carregamento dentro do card de autenticação */
+.auth-container { position: relative; }
+.overlay-carregando {
+    position: absolute;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 14px;
+    background: rgba(11, 14, 20, 0.72);
+    backdrop-filter: blur(2px);
+    border-radius: 8px;
+    z-index: 10;
+}
+.overlay-carregando.active { display: flex; }
+.overlay-carregando .aro-carregando {
+    width: 46px;
+    height: 46px;
+    border: 3px solid rgba(0, 255, 102, 0.2);
+    border-top-color: #00ff66;
+    border-radius: 50%;
+    animation: girar-spinner 0.8s linear infinite;
+}
+.overlay-carregando span {
+    color: #00ff66;
+    font-size: 0.85rem;
+    letter-spacing: 1px;
+    font-weight: bold;
+}
+
+/* ==========================================================================
+   ORDENAÇÃO NUMÉRICA DO CONSTRUTOR DE MENU
+   ========================================================================== */
+.input-ordem {
+    width: 58px !important;
+    flex: 0 0 58px;
+    text-align: center;
+    margin-bottom: 0 !important;
+    background: #0b0e14 !important;
+    border: 1px solid #00ff66 !important;
+    color: #00ff66 !important;
+    border-radius: 4px;
+    padding: 8px 4px !important;
+    font-weight: bold;
+    font-size: 0.85rem !important;
+    -moz-appearance: textfield;
+}
+.input-ordem::-webkit-outer-spin-button,
+.input-ordem::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.arrastando { opacity: 0.55; border: 1px dashed #00ff66 !important; }
+.alvo-arrasto { outline: 2px dashed #00ff66; outline-offset: 2px; }
